@@ -283,11 +283,11 @@ export default function Home() {
   };
 
   const handleNewConnection = async (conn: Peer.DataConnection) => {
-    if (peerConnectionCount >= MAX_PEERS) {
+    if (peerConnectionCount >= MAX_PEERS || connectionsRef.current[conn.peer]) {
       conn.close();
       toast({
         title: "Connection Limit Reached",
-        description: `Maximum number of peers (${MAX_PEERS}) reached.`,
+        description: `Maximum number of peers (${MAX_PEERS}) reached or already connected.`,
         variant: "destructive",
       });
       return;
@@ -605,15 +605,14 @@ export default function Home() {
       await db.messages.add(message);
       setMessages((prev) => [...prev, message]);
 
-      // Send to relevant peers
-      Object.entries(connectionsRef.current).forEach(([id, conn]) => {
-        if (selectedConversation === id || isGroupConnection(conn)) {
-          conn.send({
-            type: "text",
-            content: message.content,
-          });
-        }
-      });
+      // Send to the selected conversation peer only
+      const conn = connectionsRef.current[selectedConversation];
+      if (conn) {
+        conn.send({
+          type: "text",
+          content: message.content,
+        });
+      }
 
       setCurrentMessage("");
     } catch (error) {
@@ -658,8 +657,9 @@ export default function Home() {
         chunks.push(await chunk.arrayBuffer());
       }
 
-      // Send file info to peers
-      Object.values(connectionsRef.current).forEach((conn) => {
+      // Send file info to the selected conversation peer only
+      const conn = connectionsRef.current[selectedConversation];
+      if (conn) {
         conn.send({
           type: "file-start",
           id: fileId,
@@ -667,7 +667,7 @@ export default function Home() {
           size: dataToSend.size,
           hash: hashString,
         });
-      });
+      }
 
       // Track local progress
       setFileTransfers((prev) => ({
@@ -701,12 +701,12 @@ export default function Home() {
       }
 
       // Send file completion message
-      Object.values(connectionsRef.current).forEach((conn) => {
+      if (conn) {
         conn.send({
           type: "file-end",
           id: fileId,
         });
-      });
+      }
 
       setFiles(null);
     } catch (error) {
@@ -726,39 +726,38 @@ export default function Home() {
     retryCount = 0
   ): Promise<void> => {
     try {
-      const peers = Object.values(connectionsRef.current);
-      const sendPromises = peers.map(
-        (conn) =>
-          new Promise<void>((resolve, reject) => {
-            const timeout = setTimeout(() => {
-              reject(new Error("Chunk send timeout"));
-            }, 5000);
+      const conn = connectionsRef.current[selectedConversation];
+      if (conn) {
+        const sendPromise = new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error("Chunk send timeout"));
+          }, 5000);
 
-            conn.send({
-              type: "file-chunk",
-              id: fileId,
-              chunk,
-              index,
-            });
+          conn.send({
+            type: "file-chunk",
+            id: fileId,
+            chunk,
+            index,
+          });
 
-            // Wait for acknowledgment
-            const handleAck = (data: any) => {
-              if (
-                data.type === "chunk-ack" &&
-                data.id === fileId &&
-                data.index === index
-              ) {
-                clearTimeout(timeout);
-                conn.off("data", handleAck);
-                resolve();
-              }
-            };
+          // Wait for acknowledgment
+          const handleAck = (data: any) => {
+            if (
+              data.type === "chunk-ack" &&
+              data.id === fileId &&
+              data.index === index
+            ) {
+              clearTimeout(timeout);
+              conn.off("data", handleAck);
+              resolve();
+            }
+          };
 
-            conn.on("data", handleAck);
-          })
-      );
+          conn.on("data", handleAck);
+        });
 
-      await Promise.all(sendPromises);
+        await sendPromise;
+      }
     } catch (error) {
       if (retryCount < MAX_RETRY_ATTEMPTS) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -907,7 +906,7 @@ export default function Home() {
   };
 
   const connectToPeer = (id: string = newPeerId) => {
-    if (!peerRef.current || !id) return;
+    if (!peerRef.current || !id || connectionsRef.current[id]) return;
     const conn = peerRef.current.connect(id);
     conn.on("open", () => {
       setupConnectionListeners(conn);
