@@ -147,6 +147,7 @@ export default function Home() {
   const [peerConnectionCount, setPeerConnectionCount] = useState(0);
   const [groups, setGroups] = useState<Group[]>([]);
   const [activeGroup, setActiveGroup] = useState<string | null>(null);
+  const [conversationType, setConversationType] = useState<"group" | "individual">("individual");
 
   const peerRef = useRef<Peer>();
   const connectionsRef = useRef<Record<string, DataConnection>>({});
@@ -921,6 +922,7 @@ export default function Home() {
     setGroups((prev) => [...prev, newGroup]);
     setSelectedConversation(newGroupId);
     setActiveGroup(newGroupId);
+    setConversationType("group");
 
     // Notify existing connections
     Object.values(connectionsRef.current).forEach((conn) => {
@@ -947,6 +949,7 @@ export default function Home() {
     setGroups((prev) => prev.filter((g) => g.id !== activeGroup));
     setSelectedConversation(null);
     setActiveGroup(null);
+    setConversationType("individual");
     setConnectionStatus("ready");
   };
 
@@ -971,7 +974,12 @@ export default function Home() {
 
   const selectConversation = (id: string, isGroup?: boolean) => {
     setSelectedConversation(id);
-    if (isGroup) setActiveGroup(id);
+    if (isGroup) {
+      setActiveGroup(id);
+      setConversationType("group");
+    } else {
+      setConversationType("individual");
+    }
     setMessages([]); // Clear messages when switching peers
   };
 
@@ -1213,6 +1221,32 @@ export default function Home() {
                       )}
                     </div>
                   ))}
+                  <div className="flex space-x-2 mt-2">
+                    <Input
+                      type="text"
+                      value={currentMessage}
+                      onChange={(e) => setCurrentMessage(e.target.value)}
+                      placeholder="Type a message..."
+                      className="bg-gray-700 text-white flex-grow"
+                      onKeyPress={(e) => {
+                        if (e.key === "Enter") {
+                          sendMessage();
+                        }
+                      }}
+                    />
+                    <Button
+                      onClick={sendMessage}
+                      disabled={
+                        !selectedConversation ||
+                        connectionStatus !== "connected" ||
+                        (conversationType === "individual" &&
+                          peerConnectionCount > 1)
+                      }
+                    >
+                      <Send className="w-4 h-4 mr-2" />
+                      Send
+                    </Button>
+                  </div>
                 </div>
               </TabsContent>
               <TabsContent value="connections" className="space-y-4">
