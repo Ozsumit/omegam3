@@ -14,6 +14,8 @@ import {
   Users,
   Download,
   Copy,
+  ThumbsUp,
+  ThumbsDown,
 } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -34,7 +36,7 @@ import { useToast } from "@/components/ui/use-toast";
 import Dexie from "dexie";
 import { zipFiles } from "@/lib/zipUtils";
 
-// Enhanced interfaces with additional fields for robustness
+// Enhanced interfaces
 interface Message {
   id?: number;
   conversationId: string;
@@ -50,6 +52,8 @@ interface Message {
     url?: string;
     hash?: string;
   };
+  isGroup?: boolean;
+  reactions?: { [key: string]: number };
 }
 
 interface PeerData {
@@ -57,9 +61,10 @@ interface PeerData {
   name: string;
   lastSeen: number;
   status: "online" | "offline";
+  groups?: string[];
   customAvatar?: string;
   deviceInfo?: string;
-  unreadMessages?: number; // Added unreadMessages property
+  unreadMessages?: number;
 }
 
 interface FileTransfer {
@@ -70,9 +75,9 @@ interface FileTransfer {
   data: ArrayBuffer[];
   senderName: string;
   conversationId: string;
-  hash?: string;
   status: "pending" | "transferring" | "completed" | "failed";
   retryCount: number;
+  hash?: string;
 }
 
 interface UserProfile {
@@ -85,6 +90,12 @@ interface UserProfile {
     notifications: boolean;
     maxPeers: number;
   };
+}
+
+interface Group {
+  id: string;
+  name: string;
+  members: string[];
 }
 
 // Enhanced database schema with additional tables
@@ -130,14 +141,12 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [currentMessage, setCurrentMessage] = useState("");
   const [files, setFiles] = useState<FileList | null>(null);
-  const [fileTransfers, setFileTransfers] = useState<
-    Record<string, FileTransfer>
-  >({});
+  const [fileTransfers, setFileTransfers] = useState<Record<string, FileTransfer>>({});
   const [autoDownload, setAutoDownload] = useState(true);
-  const [selectedConversation, setSelectedConversation] = useState<
-    string | null
-  >(null);
+  const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
   const [peerConnectionCount, setPeerConnectionCount] = useState(0);
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [activeGroup, setActiveGroup] = useState<string | null>(null);
 
   const peerRef = useRef<Peer>();
   const connectionsRef = useRef<Record<string, DataConnection>>({});
@@ -221,6 +230,11 @@ export default function Home() {
       peer.on("connection", handleNewConnection);
       peer.on("error", handlePeerError);
       peer.on("disconnected", handleDisconnect);
+      peer.on("close", () => {
+        if (peerRef.current) {
+          peerRef.current.destroy();
+        }
+      });
 
       peerRef.current = peer;
 
@@ -282,7 +296,7 @@ export default function Home() {
     });
   };
 
-  const handleNewConnection = async (conn: Peer.DataConnection) => {
+  const handleNewConnection = async (conn: DataConnection) => {
     if (peerConnectionCount >= MAX_PEERS || connectionsRef.current[conn.peer]) {
       conn.close();
       toast({
@@ -301,16 +315,10 @@ export default function Home() {
       }
     }, CONNECTION_TIMEOUT);
 
-    conn.on("open", async () => {
-      clearTimeout(timeout);
+    conn.on("open", () => clearTimeout(timeout));
 
-      // Exchange profile information
-      conn.send({
-        type: "profile",
-        id: peerId,
-        name: displayName,
-        deviceInfo: navigator.userAgent,
-      });
+    conn.on("open", async () => {
+      conn.send({ type: "profile", id: peerId, name: displayName, deviceInfo: navigator.userAgent });
 
       try {
         const existingPeer = await db.peers.get(conn.peer);
@@ -329,15 +337,11 @@ export default function Home() {
         }
 
         connectionsRef.current[conn.peer] = conn;
+        setupConnectionListeners(conn);
         setPeerConnectionCount((count) => count + 1);
         setRemotePeers((prev) => [
           ...prev,
-          {
-            id: conn.peer,
-            name: conn.peer,
-            lastSeen: Date.now(),
-            status: "online",
-          },
+          { id: conn.peer, name: conn.peer, status: "online", lastSeen: Date.now(), unreadMessages: 0 },
         ]);
         setConnectionStatus("connected");
       } catch (error) {
@@ -349,7 +353,7 @@ export default function Home() {
     setupConnectionListeners(conn);
   };
 
-  const setupConnectionListeners = (conn: Peer.DataConnection) => {
+  const setupConnectionListeners = (conn: DataConnection) => {
     conn.on("data", async (data: any) => {
       try {
         if (data.type === "profile") {
@@ -367,6 +371,21 @@ export default function Home() {
           );
         } else if (data.type === "heartbeat") {
           await db.peers.update(conn.peer, { lastSeen: data.timestamp });
+        } else if (data.type === "groupUpdate") {
+          switch (data.action) {
+            case "create":
+              setGroups((prev) => [...prev, data.group]);
+              break;
+            case "join":
+              setGroups((prev) =>
+                prev.map((g) =>
+                  g.id === data.groupId
+                    ? { ...g, members: [...g.members, data.memberId] }
+                    : g
+                )
+              );
+              break;
+          }
         } else {
           handleIncomingData(conn.peer, data);
         }
@@ -385,7 +404,7 @@ export default function Home() {
   };
 
   const handleIncomingData = async (senderId: string, data: any) => {
-    const conversationId = selectedConversation || senderId;
+    const conversationId = data.groupId || selectedConversation || senderId;
 
     try {
       if (data.type === "text") {
@@ -398,6 +417,7 @@ export default function Home() {
           timestamp: Date.now(),
           type: "text",
           status: "delivered",
+          isGroup: !!data.groupId,
         };
 
         await db.messages.add(message);
@@ -591,29 +611,47 @@ export default function Home() {
   const sendMessage = async () => {
     if (!selectedConversation || !currentMessage.trim()) return;
 
-    try {
-      const message: Message = {
-        conversationId: selectedConversation,
-        senderId: peerId,
-        senderName: displayName,
-        content: currentMessage.trim(),
-        timestamp: Date.now(),
-        type: "text",
-        status: "sent",
-      };
+    const isGroup = groups.some((g) => g.id === selectedConversation);
+    const message: Message = {
+      conversationId: selectedConversation,
+      senderId: peerId,
+      senderName: displayName,
+      content: currentMessage.trim(),
+      timestamp: Date.now(),
+      type: "text",
+      status: "sent",
+      isGroup,
+    };
 
+    try {
       await db.messages.add(message);
       setMessages((prev) => [...prev, message]);
 
-      // Send to the selected conversation peer only
-      const conn = connectionsRef.current[selectedConversation];
-      if (conn) {
-        conn.send({
-          type: "text",
-          content: message.content,
+      if (isGroup) {
+        // Send to all group members
+        const group = groups.find((g) => g.id === selectedConversation);
+        group?.members.forEach((memberId) => {
+          if (memberId !== peerId) {
+            const conn = connectionsRef.current[memberId];
+            if (conn) {
+              conn.send({
+                type: "text",
+                content: message.content,
+                groupId: selectedConversation,
+              });
+            }
+          }
         });
+      } else {
+        // Direct message
+        const conn = connectionsRef.current[selectedConversation];
+        if (conn) {
+          conn.send({
+            type: "text",
+            content: message.content,
+          });
+        }
       }
-
       setCurrentMessage("");
     } catch (error) {
       console.error("Error sending message:", error);
@@ -869,40 +907,47 @@ export default function Home() {
   };
 
   const isGroupConnection = (conn: Peer.DataConnection): boolean => {
-    return isInGroup && conn.peer === groupId;
+    return activeGroup && conn.peer === activeGroup;
   };
 
   const createGroup = () => {
     const newGroupId = generatePeerId();
-    setGroupId(newGroupId);
-    setIsInGroup(true);
-    toast({
-      title: "Group Created",
-      description: `Your group ID is ${newGroupId}. Share this with others to let them join.`,
+    const newGroup: Group = {
+      id: newGroupId,
+      name: `Group ${newGroupId.slice(0, 4)}`,
+      members: [peerId],
+    };
+
+    setGroups((prev) => [...prev, newGroup]);
+    setSelectedConversation(newGroupId);
+    setActiveGroup(newGroupId);
+
+    // Notify existing connections
+    Object.values(connectionsRef.current).forEach((conn) => {
+      conn.send({
+        type: "groupUpdate",
+        action: "create",
+        group: newGroup,
+      });
     });
   };
 
-  const joinGroup = (id: string) => {
-    if (!peerRef.current) return;
-    setGroupId(id);
-    setIsInGroup(true);
-    connectToPeer(id);
-    toast({
-      title: "Joined Group",
-      description: `You've joined group ${id}.`,
+  const joinGroup = (inviterId: string, groupId: string) => {
+    const conn = connectionsRef.current[inviterId];
+    if (!conn) return;
+
+    conn.send({
+      type: "groupJoin",
+      groupId,
     });
   };
 
   const leaveGroup = () => {
     Object.values(connectionsRef.current).forEach((conn) => conn.close());
-    setRemotePeers([]);
-    setGroupId("");
-    setIsInGroup(false);
+    setGroups((prev) => prev.filter((g) => g.id !== activeGroup));
+    setSelectedConversation(null);
+    setActiveGroup(null);
     setConnectionStatus("ready");
-    toast({
-      title: "Left Group",
-      description: "You've left the group.",
-    });
   };
 
   const connectToPeer = (id: string = newPeerId) => {
@@ -913,7 +958,7 @@ export default function Home() {
       connectionsRef.current[id] = conn;
       setRemotePeers((prev) => [
         ...prev,
-        { id, name: id, lastSeen: Date.now(), unreadMessages: 0 },
+        { id, name: id, status: "online", lastSeen: Date.now(), unreadMessages: 0 },
       ]);
       setNewPeerId("");
       setConnectionStatus("connected");
@@ -924,8 +969,9 @@ export default function Home() {
     });
   };
 
-  const selectPeer = (peerId: string) => {
-    setSelectedConversation(peerId);
+  const selectConversation = (id: string, isGroup?: boolean) => {
+    setSelectedConversation(id);
+    if (isGroup) setActiveGroup(id);
     setMessages([]); // Clear messages when switching peers
   };
 
@@ -964,18 +1010,61 @@ export default function Home() {
     }
   };
 
+  const addReaction = (messageId: number, reaction: string) => {
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === messageId
+          ? {
+              ...msg,
+              reactions: {
+                ...msg.reactions,
+                [reaction]: (msg.reactions?.[reaction] || 0) + 1,
+              },
+            }
+          : msg
+      )
+    );
+
+    // Update in database
+    db.messages.update(messageId, {
+      reactions: {
+        ...(prev.find((msg) => msg.id === messageId)?.reactions || {}),
+        [reaction]: (prev.find((msg) => msg.id === messageId)?.reactions?.[reaction] || 0) + 1,
+      },
+    });
+  };
+
   return (
     <div className="min-h-screen bg-gray-900 text-white p-4 flex flex-col md:flex-row">
       <div className="w-full md:w-1/4 p-4 bg-gray-800 rounded-md mb-4 md:mb-0">
         <h2 className="text-xl font-bold mb-4">Conversations</h2>
         <ScrollArea className="h-full bg-gray-700 rounded-md p-2">
+          {/* Groups Section */}
+          <div className="mb-4">
+            <h3 className="font-medium mb-2">Groups</h3>
+            {groups.map((group) => (
+              <div
+                key={group.id}
+                className={`flex items-center space-x-2 mb-2 p-2 rounded-md cursor-pointer ${
+                  selectedConversation === group.id ? "bg-blue-600" : "bg-gray-600"
+                }`}
+                onClick={() => selectConversation(group.id, true)}
+              >
+                <Users className="w-4 h-4" />
+                <span>{group.name}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Individual Peers Section */}
+          <h3 className="font-medium mb-2">Peers</h3>
           {remotePeers.map((peer) => (
             <div
               key={peer.id}
               className={`flex items-center space-x-2 mb-2 p-2 rounded-md cursor-pointer ${
                 selectedConversation === peer.id ? "bg-blue-600" : "bg-gray-600"
               }`}
-              onClick={() => selectPeer(peer.id)}
+              onClick={() => selectConversation(peer.id)}
             >
               <Avatar className="h-8 w-8">
                 <AvatarFallback>{peer.name.charAt(0)}</AvatarFallback>
@@ -1031,6 +1120,29 @@ export default function Home() {
                           <p className="text-sm text-gray-300">
                             {msg.senderName}
                           </p>
+                          <p className="text-xs text-gray-400">
+                            {new Date(msg.timestamp).toLocaleTimeString()}
+                          </p>
+                          <div className="flex space-x-2 mt-2">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() =>
+                                addReaction(msg.id!, "thumbs-up")
+                              }
+                            >
+                              <ThumbsUp className="w-4 h-4" />
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() =>
+                                addReaction(msg.id!, "thumbs-down")
+                              }
+                            >
+                              <ThumbsDown className="w-4 h-4" />
+                            </Button>
+                          </div>
                           {msg.type === "file" ? (
                             <div className="flex items-center">
                               <span>{msg.content}</span>
@@ -1045,27 +1157,11 @@ export default function Home() {
                           ) : (
                             <p>{msg.content}</p>
                           )}
-                          <p className="text-xs text-gray-400">
-                            {new Date(msg.timestamp).toLocaleTimeString()}
-                          </p>
                         </div>
                       </div>
                     ))}
                   </ScrollArea>
                   <div className="flex space-x-2">
-                    <Input
-                      placeholder="Type a message"
-                      value={currentMessage}
-                      onChange={(e) => setCurrentMessage(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && sendMessage()}
-                    />
-                    <Button onClick={sendMessage}>
-                      <Send className="w-4 h-4" />
-                    </Button>
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <div className="flex flex-wrap gap-2">
                     <Input
                       type="file"
                       onChange={(e) => setFiles(e.target.files)}
@@ -1142,104 +1238,96 @@ export default function Home() {
                       Connect
                     </Button>
                   </div>
-                </div>
-                <div>
-                  <p className="mb-2">Status: {connectionStatus}</p>
-                </div>
-                <div className="flex justify-between items-center">
-                  <Dialog>
-                    <DialogTrigger asChild>
-                      <Button disabled={isInGroup}>
-                        <Users className="w-4 h-4 mr-2" />
-                        {isInGroup ? "In Group" : "Create/Join Group"}
-                      </Button>
-                    </DialogTrigger>
-                    <DialogContent>
-                      <DialogHeader>
-                        <DialogTitle>
-                          {isInGroup ? "Group Info" : "Create or Join Group"}
-                        </DialogTitle>
-                        <DialogDescription>
-                          {isInGroup
-                            ? `You're in group ${groupId}. Share this ID with others to let them join.`
-                            : "Create a new group or join an existing one by entering the group ID."}
-                        </DialogDescription>
-                      </DialogHeader>
-                      {isInGroup ? (
-                        <div className="flex items-center space-x-2">
-                          <Input
-                            value={groupId}
-                            readOnly
-                            className="bg-gray-700 text-white"
-                          />
-                          <Button
-                            onClick={() => {
-                              navigator.clipboard.writeText(groupId);
-                              toast({
-                                title: "Copied",
-                                description: "Group ID copied to clipboard",
-                              });
-                            }}
-                          >
-                            <Copy className="w-4 h-4" />
-                          </Button>
-                        </div>
-                      ) : (
-                        <div className="space-y-4">
-                          <Button onClick={createGroup} className="w-full">
-                            Create New Group
-                          </Button>
-                          <div className="flex space-x-2">
+                  <div>
+                    <p className="mb-2">Status: {connectionStatus}</p>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <Dialog>
+                      <DialogTrigger asChild>
+                        <Button disabled={isInGroup}>
+                          <Users className="w-4 h-4 mr-2" />
+                          {isInGroup ? "In Group" : "Create/Join Group"}
+                        </Button>
+                      </DialogTrigger>
+                      <DialogContent>
+                        <DialogHeader>
+                          <DialogTitle>
+                            {isInGroup ? "Group Info" : "Create or Join Group"}
+                          </DialogTitle>
+                          <DialogDescription>
+                            {isInGroup
+                              ? `You're in group ${activeGroup}. Share this ID with others to let them join.`
+                              : "Create a new group or join an existing one by entering the group ID."}
+                          </DialogDescription>
+                        </DialogHeader>
+                        {isInGroup ? (
+                          <div className="flex items-center space-x-2">
                             <Input
-                              placeholder="Enter Group ID"
-                              value={newPeerId}
-                              onChange={(e) => setNewPeerId(e.target.value)}
+                              value={activeGroup!}
+                              readOnly
                               className="bg-gray-700 text-white"
                             />
-                            <Button onClick={() => joinGroup(newPeerId)}>
-                              Join
+                            <Button
+                              onClick={() => {
+                                navigator.clipboard.writeText(activeGroup!);
+                                toast({
+                                  title: "Copied",
+                                  description: "Group ID copied to clipboard",
+                                });
+                              }}
+                            >
+                              <Copy className="w-4 h-4" />
                             </Button>
                           </div>
-                        </div>
-                      )}
-                      <DialogFooter>
-                        {isInGroup && (
-                          <Button variant="destructive" onClick={leaveGroup}>
-                            Leave Group
-                          </Button>
+                        ) : (
+                          <div className="space-y-4">
+                            <Button onClick={createGroup} className="w-full">
+                              Create New Group
+                            </Button>
+                            <div className="flex space-x-2">
+                              <Input
+                                placeholder="Enter Group ID"
+                                value={newPeerId}
+                                onChange={(e) => setNewPeerId(e.target.value)}
+                                className="bg-gray-700 text-white"
+                              />
+                              <Button onClick={() => joinGroup(newPeerId)}>
+                                Join
+                              </Button>
+                            </div>
+                          </div>
                         )}
-                      </DialogFooter>
-                    </DialogContent>
-                  </Dialog>
-                  <div className="flex items-center space-x-2">
-                    <Switch
-                      id="auto-download"
-                      checked={autoDownload}
-                      onCheckedChange={setAutoDownload}
-                    />
-                    <Label htmlFor="auto-download">Auto-download files</Label>
+                        <DialogFooter>
+                          {isInGroup && (
+                            <Button variant="destructive" onClick={leaveGroup}>
+                              Leave Group
+                            </Button>
+                          )}
+                        </DialogFooter>
+                      </DialogContent>
+                    </Dialog>
                   </div>
-                </div>
-                <div>
-                  <p className="mb-2">Connected Peers:</p>
-                  <ScrollArea className="h-40 bg-gray-700 rounded-md p-2">
-                    {remotePeers.map((peer) => (
-                      <div
-                        key={peer.id}
-                        className={`flex items-center space-x-2 mb-2 p-2 rounded-md cursor-pointer ${
-                          selectedConversation === peer.id
-                            ? "bg-blue-600"
-                            : "bg-gray-600"
-                        }`}
-                        onClick={() => selectPeer(peer.id)}
-                      >
-                        <Avatar className="h-8 w-8">
-                          <AvatarFallback>{peer.name.charAt(0)}</AvatarFallback>
-                        </Avatar>
-                        <span>{peer.name}</span>
-                      </div>
-                    ))}
-                  </ScrollArea>
+                  <div>
+                    <p className="mb-2">Connected Peers:</p>
+                    <ScrollArea className="h-40 bg-gray-700 rounded-md p-2">
+                      {remotePeers.map((peer) => (
+                        <div
+                          key={peer.id}
+                          className={`flex items-center space-x-2 mb-2 p-2 rounded-md cursor-pointer ${
+                            selectedConversation === peer.id
+                              ? "bg-blue-600"
+                              : "bg-gray-600"
+                          }`}
+                          onClick={() => selectConversation(peer.id)}
+                        >
+                          <Avatar className="h-8 w-8">
+                            <AvatarFallback>{peer.name.charAt(0)}</AvatarFallback>
+                          </Avatar>
+                          <span>{peer.name}</span>
+                        </div>
+                      ))}
+                    </ScrollArea>
+                  </div>
                 </div>
               </TabsContent>
             </Tabs>
