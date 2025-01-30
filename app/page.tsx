@@ -121,7 +121,7 @@ const db = new MessagingDB();
 // Constants
 const MAX_PEERS = 100;
 const MAX_RETRY_ATTEMPTS = 3;
-const CHUNK_SIZE = 16384;
+const CHUNK_SIZE = 65536; // Increased chunk size for better performance
 const HEARTBEAT_INTERVAL = 30000;
 const CONNECTION_TIMEOUT = 10000;
 
