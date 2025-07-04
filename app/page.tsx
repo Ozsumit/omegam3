@@ -1071,8 +1071,8 @@ function WelcomeModal({
     <Dialog open={true}>
       <DialogContent className="sm:max-w-[425px] bg-gradient-to-br from-slate-900 to-slate-800 text-white border-slate-700 shadow-2xl">
         <DialogHeader>
-          <DialogTitle className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
-            Welcome to P2P Chat
+          <DialogTitle className="text-2xl font-bold bg-gradient-to-r from-zinc-400 to-zinc-200 bg-clip-text text-transparent">
+            Welcome to Omega chat
           </DialogTitle>
           <DialogDescription className="text-slate-300">
             Create your profile to start connecting with peers securely.
@@ -1086,7 +1086,7 @@ function WelcomeModal({
             id="name"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            className="bg-slate-800 border-slate-600 text-white focus:border-blue-400 focus:ring-blue-400/20 mt-2"
+            className="bg-slate-700 border-slate-600 text-white focus:border-blue-400 focus:ring-blue-400/20 mt-2"
             placeholder="Enter your name"
             onKeyDown={(e) => e.key === "Enter" && handleCreate()}
           />
@@ -1095,7 +1095,7 @@ function WelcomeModal({
           <Button
             onClick={handleCreate}
             disabled={isCreating || !name.trim()}
-            className="bg-gradient-to-r from-blue-500 to-purple-500 hover:from-blue-600 hover:to-purple-600 text-white font-medium w-full"
+            className="bg-white text-black font-medium w-full"
           >
             {isCreating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             Get Started
@@ -1526,7 +1526,7 @@ function ChatWindow({
       <div className="flex-1 flex flex-col items-center justify-center bg-slate-800 text-center p-4">
         <Zap size={64} className="mb-4 text-slate-500" />
         <h2 className="text-2xl font-bold text-slate-300">
-          Welcome to P2P Chat
+          Welcome to Omega chat
         </h2>
         <p className="text-gray-400 max-w-sm">
           Select a peer from the list to start a conversation, or add a new peer
