@@ -1119,7 +1119,7 @@ function ZipConfirmationDialog({
 }) {
   return (
     <Dialog open={true} onOpenChange={(isOpen) => !isOpen && onCancel()}>
-      <DialogContent className="sm:max-w-[425px] bg-slate-800 text-white border-slate-700">
+      <DialogContent className="sm:max-w-[60%] bg-slate-800 text-white border-slate-700">
         <DialogHeader>
           <DialogTitle>Send Folder '{folderName}'</DialogTitle>
           <DialogDescription>
@@ -1401,14 +1401,14 @@ function MessageBubble({
           </p>
         )}
         {message.type === "text" && (
-          <p className="whitespace-pre-wrap break-words">{message.content}</p>
+          <p className="whitespace-pre-wrap break-words ">{message.content}</p>
         )}
         {message.type === "file-transfer" && message.fileInfo && (
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-[13rem] flex-col items-center gap-3">
             {getFileIcon(message.fileInfo.type)}
             <div>
-              <p className="font-medium">{message.fileInfo.name}</p>
-              <p className="text-sm text-gray-300">
+              <p className="font-medium text-ellipsis text-center text-wrap">{message.fileInfo.name}</p>
+              <p className="text-sm text-center text-gray-300">
                 {formatBytes(message.fileInfo.size)}
               </p>
             </div>
@@ -1564,6 +1564,11 @@ function ChatWindow({
           onConfirmZip={() => {
             onZipAndSendFolder(folderToSend.handle);
             setFolderToSend(null);
+            alert(
+              "Your file is being processed. It may take some time showing up on the ui depending on the size of app. Do not close this tab    "
+            );
+    //         <DialogDescription id="zipping-complete">
+    // Your file is being processed. It may take some time showing up on the ui depending on the size of app. Do not close this tab            </DialogDescription>
           }}
         />
       )}
@@ -1699,12 +1704,12 @@ function AppLayout({ profile }: { profile: UserProfile }) {
 
   return (
     // UPDATED: This layout now handles mobile and desktop views
-    <div className="flex h-screen bg-slate-900 text-white font-sans overflow-hidden">
+    <div className="flex h-screen w-screen bg-slate-900 text-white font-sans overflow-hidden">
       {/* Sidebar Container: On mobile, hidden if a chat is selected. Always shown on desktop. */}
       <div
         className={`
           ${state.selectedConversationId ? "hidden" : "flex"}
-          md:flex flex-col flex-shrink-0 w-full md:w-1/4 md:min-w-[300px]
+          md:flex flex-col flex-shrink-1 w-full md:w-1/4 md:min-w-[300px]
         `}
       >
         <Sidebar
