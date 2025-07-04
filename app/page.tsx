@@ -22,8 +22,15 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Toaster } from "@/components/ui/toaster";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+} from "@/components/ui/dropdown-menu";
 
-// --- Icon Imports (Added ArrowLeft) ---
+// --- Icon Imports ---
 import {
   Loader2,
   Send,
@@ -41,7 +48,9 @@ import {
   Archive,
   RefreshCw,
   Zap,
-  ArrowLeft, // Added for mobile back button
+  ArrowLeft,
+  MoreVertical,
+  Trash2,
 } from "lucide-react";
 
 // --- Interfaces & Types ---
@@ -137,15 +146,9 @@ type ChatAction =
   | {
       type: "FINISH_FILE_TRANSFER";
       payload: { id: string; status: FileTransfer["status"] };
-    };
-
-// --- P2P Data Payload Type ---
-type PeerMessagePayload =
-  | { type: "profile-info"; payload: { id: string; name: string } }
-  | { type: "text"; payload: { content: string } }
-  | { type: "file-meta"; payload: FileInfo }
-  | { type: "file-chunk"; payload: { id: string; chunk: ArrayBuffer } }
-  | { type: "file-end"; payload: { id: string } };
+    }
+  | { type: "CLEAR_MESSAGES"; payload: string }
+  | { type: "REMOVE_PEER"; payload: string };
 
 const CHUNK_SIZE = 256 * 1024;
 
@@ -200,6 +203,33 @@ const getFileIcon = (type: string) => {
 };
 
 const titleCase = (str: string) => str.charAt(0).toUpperCase() + str.slice(1);
+
+const LinkifyText = ({ text }: { text: string }) => {
+  const urlRegex = /(https?:\/\/[^\s]+)/g;
+
+  const parts = text.split(urlRegex);
+
+  return (
+    <>
+      {parts.map((part, index) => {
+        if (part.match(urlRegex)) {
+          return (
+            <a
+              key={index}
+              href={part}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-blue-300 hover:underline"
+            >
+              {part}
+            </a>
+          );
+        }
+        return <span key={index}>{part}</span>;
+      })}
+    </>
+  );
+};
 
 // --- Hooks ---
 
@@ -398,6 +428,28 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
         },
       };
     }
+    case "CLEAR_MESSAGES": {
+      const newMessages = { ...state.messages };
+      newMessages[payload] = [];
+      return { ...state, messages: newMessages };
+    }
+    case "REMOVE_PEER": {
+      const newPeers = { ...state.peers };
+      delete newPeers[payload];
+
+      const newMessages = { ...state.messages };
+      delete newMessages[payload];
+
+      return {
+        ...state,
+        peers: newPeers,
+        messages: newMessages,
+        selectedConversationId:
+          state.selectedConversationId === payload
+            ? null
+            : state.selectedConversationId,
+      };
+    }
     default:
       return state;
   }
@@ -531,12 +583,22 @@ function usePeer({
     []
   );
 
+  const disconnectPeer = useCallback((peerId: string) => {
+    const conn = connectionsRef.current[peerId];
+    if (conn) {
+      conn.close();
+      delete connectionsRef.current[peerId];
+      console.log(`Manually disconnected from ${peerId}`);
+    }
+  }, []);
+
   return {
     peerId: profile?.id,
     isPeerReady,
     connectToPeer,
     reconnectToPastPeers,
     sendMessageToPeer,
+    disconnectPeer,
   };
 }
 
@@ -549,7 +611,7 @@ function useChatManager(profile: UserProfile | null) {
     selectedConversationId: null,
   };
   const [state, dispatch] = useReducer(chatReducer, initialState);
-  const { toast } = useToast();
+  const { toast, update } = useToast(); // Destructure 'update' from useToast
   const { requestPermission, showNotification } = useNotifications();
   const incomingFileBuffers = useRef<
     Record<string, { metadata: FileInfo; chunks: ArrayBuffer[] }>
@@ -702,7 +764,6 @@ function useChatManager(profile: UserProfile | null) {
 
   const handlePeerDisconnected = useCallback(
     async (peerId: string, hadError?: boolean) => {
-      // Don't do anything if we don't know about this peer
       if (!state.peers[peerId]) return;
 
       await db.peers.update(peerId, {
@@ -965,7 +1026,7 @@ function useChatManager(profile: UserProfile | null) {
   };
 
   const zipAndSendFolder = async (folderHandle: any) => {
-    const { dismiss, update } = toast({
+    const zipToast = toast({
       description: (
         <div className="flex items-center">
           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -973,6 +1034,7 @@ function useChatManager(profile: UserProfile | null) {
         </div>
       ),
       duration: 999999,
+      // No 'id' property here. The id is returned from toast()
     });
 
     const zip = new JSZip();
@@ -995,27 +1057,29 @@ function useChatManager(profile: UserProfile | null) {
       const blob = await zip.generateAsync({
         type: "blob",
         compression: "DEFLATE",
+        // onUpdate: (metadata) => {
+        //   update(zipToast.id, { description: `Zipping: ${metadata.percent.toFixed(0)}%` });
+        // }
       });
       const zipFile = new File([blob], `${folderHandle.name}.zip`, {
         type: "application/zip",
       });
-      update({
-        id: "zipping-complete",
+
+      update(zipToast.id, { // Use update correctly: id as first argument
         title: "Zipping Complete",
         description: "Zipping complete. Starting transfer...",
         duration: 3000,
       });
       await sendFile(zipFile);
-      dismiss();
     } catch (error) {
       console.error("Error zipping folder:", error);
-      dismiss();
-      toast({
+      toast({ // Call toast directly here, or dismiss if it was a success toast before
         title: "Zipping Failed",
         description: "An error occurred while creating the zip file.",
         variant: "destructive",
         duration: 5000,
       });
+      update(zipToast.id, { dismiss: true }); // Dismiss the original zipping toast
     }
   };
 
@@ -1039,6 +1103,42 @@ function useChatManager(profile: UserProfile | null) {
     }
   };
 
+  const clearChatHistory = async (conversationId: string) => {
+    await db.messages.where({ conversationId: conversationId }).delete();
+    dispatch({ type: "CLEAR_MESSAGES", payload: conversationId });
+    toast({
+      title: "Chat History Cleared",
+      description: "Messages deleted for this conversation.",
+    });
+  };
+
+  const removePeer = async (peerIdToRemove: string) => {
+    try {
+      peerHook.disconnectPeer(peerIdToRemove);
+
+      await db.peers.delete(peerIdToRemove);
+      await db.messages.where({ conversationId: peerIdToRemove }).delete();
+
+      dispatch({ type: "REMOVE_PEER", payload: peerIdToRemove });
+
+      toast({
+        title: "Peer Removed",
+        description: `Peer ${
+          state.peers[peerIdToRemove]?.name || peerIdToRemove
+        } and their chat history have been removed.`,
+      });
+    } catch (error) {
+      console.error("Error removing peer:", error);
+      toast({
+        title: "Error",
+        description: `Failed to remove peer ${
+          state.peers[peerIdToRemove]?.name || peerIdToRemove
+        }.`,
+        variant: "destructive",
+      });
+    }
+  };
+
   return {
     state,
     connectToPeer,
@@ -1049,6 +1149,8 @@ function useChatManager(profile: UserProfile | null) {
     sendFolderAsIndividualFiles,
     zipAndSendFolder,
     downloadFile,
+    clearChatHistory,
+    removePeer,
   };
 }
 
@@ -1065,7 +1167,6 @@ function WelcomeModal({
     if (!name.trim()) return;
     setIsCreating(true);
     await onProfileCreate(name);
-    // isCreating will stay true as the component unmounts
   };
   return (
     <Dialog open={true}>
@@ -1149,7 +1250,40 @@ function ZipConfirmationDialog({
     </Dialog>
   );
 }
-  
+
+function RemovePeerConfirmationDialog({
+  peerName,
+  onConfirm,
+  onCancel,
+  open,
+}: {
+  peerName: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+  open: boolean;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onCancel}>
+      <DialogContent className="sm:max-w-[425px]">
+        <DialogHeader>
+          <DialogTitle>Remove {peerName}?</DialogTitle>
+          <DialogDescription>
+            Are you sure you want to remove "{peerName}" from your peer list and
+            delete all their chat history? This action cannot be undone.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={onConfirm}>
+            <Trash2 className="mr-2 h-4 w-4" /> Remove Peer
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 // --- Sidebar Component (now responsive) ---
 function Sidebar({
@@ -1221,13 +1355,11 @@ function Sidebar({
         return (
           <Loader2
             className="absolute bottom-0 right-0 h-3.5 w-3.5 animate-spin text-yellow-400 bg-slate-900 rounded-full"
-
           />
         );
     }
   };
 
-  // UPDATED: Removed fixed width classes, now takes full width of parent
   return (
     <aside className="w-full h-full bg-slate-900 flex flex-col p-4 border-r border-slate-700/50">
       <div className="mb-4 flex-shrink-0">
@@ -1365,6 +1497,8 @@ function MessageBubble({
   transfer?: FileTransfer;
   onDownloadFile: (fileInfo: FileInfo) => void;
 }) {
+  const { toast } = useToast();
+
   const renderStatusIcon = () => {
     if (!isMe) return null;
     switch (message.status) {
@@ -1387,13 +1521,23 @@ function MessageBubble({
   const isTransferCompleted = transfer?.status === "completed";
   const isTransferFailed = transfer?.status === "failed";
 
+  const copyMessageText = useCallback(() => {
+    if (message.content) {
+      navigator.clipboard.writeText(message.content);
+      toast({
+        title: "Copied!",
+        description: "Message copied to clipboard.",
+        duration: 2000,
+      });
+    }
+  }, [message.content, toast]);
+
   return (
     <div className={`flex flex-col ${isMe ? "items-end" : "items-start"}`}>
-      {/* UPDATED: Responsive max-width */}
       <div
-        className={`max-w-[85%] sm:max-w-md lg:max-w-xl p-3 rounded-lg ${
+        className={`group max-w-[85%] sm:max-w-md lg:max-w-xl p-3 rounded-lg ${
           isMe ? "bg-blue-600" : "bg-slate-700"
-        }`}
+        } relative`}
       >
         {!isMe && (
           <p className="text-sm font-semibold text-indigo-300 mb-1">
@@ -1401,13 +1545,30 @@ function MessageBubble({
           </p>
         )}
         {message.type === "text" && (
-          <p className="whitespace-pre-wrap break-words ">{message.content}</p>
+          <div className="flex items-end gap-2">
+            <p className="whitespace-pre-wrap break-words">
+              <LinkifyText text={message.content} />
+            </p>
+            <Button
+              variant="ghost"
+              size="icon"
+              className={`h-6 w-6 text-gray-200 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity ${
+                isMe ? "hover:bg-blue-500" : "hover:bg-slate-600"
+              }`}
+              onClick={copyMessageText}
+              title="Copy message"
+            >
+              <Copy className="h-3 w-3" />
+            </Button>
+          </div>
         )}
         {message.type === "file-transfer" && message.fileInfo && (
           <div className="flex min-w-[13rem] flex-col items-center gap-3">
             {getFileIcon(message.fileInfo.type)}
             <div>
-              <p className="font-medium text-ellipsis text-center text-wrap">{message.fileInfo.name}</p>
+              <p className="font-medium text-ellipsis text-center text-wrap">
+                {message.fileInfo.name}
+              </p>
               <p className="text-sm text-center text-gray-300">
                 {formatBytes(message.fileInfo.size)}
               </p>
@@ -1467,7 +1628,9 @@ function ChatWindow({
   onSendFolderAsIndividualFiles,
   onZipAndSendFolder,
   onDownloadFile,
-  onBack, // ADDED: For mobile navigation
+  onBack,
+  onClearChatHistory,
+  onRemovePeer,
 }: {
   profile: UserProfile;
   selectedConversationId: string | null;
@@ -1479,13 +1642,18 @@ function ChatWindow({
   onSendFolderAsIndividualFiles: (folderHandle: any) => void;
   onZipAndSendFolder: (folderHandle: any) => void;
   onDownloadFile: (fileInfo: FileInfo) => void;
-  onBack?: () => void; // ADDED: Optional prop
+  onBack?: () => void;
+  onClearChatHistory: (conversationId: string) => void;
+  onRemovePeer: (peerId: string) => void;
 }) {
   const [currentMessage, setCurrentMessage] = useState<string>("");
   const [folderToSend, setFolderToSend] = useState<{
     handle: any;
     name: string;
   } | null>(null);
+  const [showClearHistoryDialog, setShowClearHistoryDialog] = useState(false);
+  const [showRemovePeerDialog, setShowRemovePeerDialog] = useState(false);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -1508,7 +1676,6 @@ function ChatWindow({
   };
 
   const handleFolderPick = async () => {
-    // Note: showDirectoryPicker is not available in all browsers (e.g., Firefox)
     if ("showDirectoryPicker" in window) {
       try {
         const folderHandle = await (window as any).showDirectoryPicker();
@@ -1519,6 +1686,23 @@ function ChatWindow({
     } else {
       alert("Your browser does not support folder selection.");
     }
+  };
+
+  const handleClearHistoryConfirm = () => {
+    if (selectedConversationId) {
+      onClearChatHistory(selectedConversationId);
+    }
+    setShowClearHistoryDialog(false);
+    location.reload();
+
+  };
+
+  const handleRemovePeerConfirm = () => {
+    if (selectedConversationId) {
+      onRemovePeer(selectedConversationId);
+    }
+    setShowRemovePeerDialog(false);
+    location.reload();
   };
 
   if (!selectedConversationId) {
@@ -1564,19 +1748,45 @@ function ChatWindow({
           onConfirmZip={() => {
             onZipAndSendFolder(folderToSend.handle);
             setFolderToSend(null);
-            alert(
-              "Your file is being processed. It may take some time showing up on the ui depending on the size of app. Do not close this tab    "
-            );
-    //         <DialogDescription id="zipping-complete">
-    // Your file is being processed. It may take some time showing up on the ui depending on the size of app. Do not close this tab            </DialogDescription>
           }}
         />
       )}
+      <Dialog
+        open={showClearHistoryDialog}
+        onOpenChange={setShowClearHistoryDialog}
+      >
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle>Clear Chat History?</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to clear all messages in this chat? This
+              action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowClearHistoryDialog(false)}
+            >
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleClearHistoryConfirm}>
+              <Trash2 className="mr-2 h-4 w-4" /> Clear History
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <RemovePeerConfirmationDialog
+        open={showRemovePeerDialog}
+        peerName={selectedPeer?.name || "this peer"}
+        onConfirm={handleRemovePeerConfirm}
+        onCancel={() => setShowRemovePeerDialog(false)}
+      />
+
       <div className="flex-1 flex flex-col bg-slate-800 min-h-0 h-full">
-        {/* UPDATED: Header is now responsive */}
         <header className="flex-shrink-0 px-4 py-3 bg-slate-900/70 border-b border-slate-700/50 flex items-center justify-between">
           <div className="flex items-center overflow-hidden">
-            {/* ADDED: Back button for mobile */}
             {onBack && (
               <Button
                 onClick={onBack}
@@ -1591,18 +1801,47 @@ function ChatWindow({
               {selectedPeer?.name ?? "Select a Chat"}
             </h2>
           </div>
-          {selectedPeer && (
-            <div className="flex items-center gap-2 text-sm flex-shrink-0">
-              <span
-                className={`h-2.5 w-2.5 rounded-full ${statusInfo.color}`}
-              ></span>
-              <span className="text-slate-300">{statusInfo.text}</span>
-            </div>
-          )}
+          <div className="flex items-center gap-2">
+            {selectedPeer && (
+              <div className="flex items-center gap-2 text-sm flex-shrink-0">
+                <span
+                  className={`h-2.5 w-2.5 rounded-full ${statusInfo.color}`}
+                ></span>
+                <span className="text-slate-300">{statusInfo.text}</span>
+              </div>
+            )}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" className="h-8 w-8">
+                  <MoreVertical className="h-5 w-5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent className="w-48 bg-slate-800 border-slate-700 text-white">
+                <DropdownMenuItem
+                  className="cursor-pointer text-red-400 focus:bg-slate-700/50 focus:text-red-300"
+                  onClick={() => setShowClearHistoryDialog(true)}
+                >
+                  <Trash2 className="mr-2 h-4 w-4" /> Clear History
+                </DropdownMenuItem>
+                <DropdownMenuSeparator className="bg-slate-700" />
+                <DropdownMenuItem
+                  className="cursor-pointer text-red-400 focus:bg-slate-700/50 focus:text-red-300"
+                  onClick={() => setShowRemovePeerDialog(true)}
+                >
+                  <Trash2 className="mr-2 h-4 w-4" /> Remove Peer
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </header>
 
         <ScrollArea className="flex-1 p-4">
           <div className="space-y-4">
+            {messages.length === 0 && (
+              <div className="text-center text-gray-400 py-10">
+                <p>No messages yet. Start a conversation!</p>
+              </div>
+            )}
             {messages.map((msg, index) => (
               <div
                 key={msg.id ?? msg.tempId ?? index}
@@ -1693,6 +1932,8 @@ function AppLayout({ profile }: { profile: UserProfile }) {
     sendFolderAsIndividualFiles,
     zipAndSendFolder,
     downloadFile,
+    clearChatHistory,
+    removePeer,
   } = useChatManager(profile);
 
   const peersArray = Object.values(state.peers)
@@ -1703,9 +1944,7 @@ function AppLayout({ profile }: { profile: UserProfile }) {
     state.messages[state.selectedConversationId ?? ""] ?? [];
 
   return (
-    // UPDATED: This layout now handles mobile and desktop views
     <div className="flex h-screen w-screen bg-slate-900 text-white font-sans overflow-hidden">
-      {/* Sidebar Container: On mobile, hidden if a chat is selected. Always shown on desktop. */}
       <div
         className={`
           ${state.selectedConversationId ? "hidden" : "flex"}
@@ -1722,7 +1961,6 @@ function AppLayout({ profile }: { profile: UserProfile }) {
         />
       </div>
 
-      {/* ChatWindow Container: On mobile, only shown if a chat is selected. Always shown on desktop. */}
       <main
         className={`
           ${!state.selectedConversationId ? "hidden" : "flex"}
@@ -1740,7 +1978,9 @@ function AppLayout({ profile }: { profile: UserProfile }) {
           onSendFolderAsIndividualFiles={sendFolderAsIndividualFiles}
           onZipAndSendFolder={zipAndSendFolder}
           onDownloadFile={downloadFile}
-          onBack={() => selectConversation(null)} // This enables the back button on mobile
+          onBack={() => selectConversation(null)}
+          onClearChatHistory={clearChatHistory}
+          onRemovePeer={removePeer}
         />
       </main>
     </div>
