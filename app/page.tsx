@@ -1,1373 +1,1773 @@
 "use client";
 
-import { useState, useEffect, useRef, ChangeEvent } from "react";
-import { Peer, DataConnection } from "peerjs";
+import { useState, useEffect, useRef, useCallback, useReducer } from "react";
+import Peer, { DataConnection } from "peerjs";
+import Dexie from "dexie";
+import JSZip from "jszip";
+
+// --- UI Imports ---
+import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Loader2,
-  Send,
-  Upload,
-  Folder,
-  UserPlus,
-  Users,
-  Download,
-  Copy,
-  ThumbsUp,
-  ThumbsDown,
-} from "lucide-react";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
+  DialogDescription,
+  DialogFooter,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { useToast } from "@/components/ui/use-toast";
-import Dexie from "dexie";
-import { zipFiles } from "@/lib/zipUtils";
+import { Toaster } from "@/components/ui/toaster";
 
-// Enhanced interfaces
+// --- Icon Imports (Added ArrowLeft) ---
+import {
+  Loader2,
+  Send,
+  UserPlus,
+  Download,
+  Copy,
+  Paperclip,
+  XCircle,
+  CheckCircle,
+  Hourglass,
+  FileText,
+  Image,
+  Video,
+  Music,
+  Archive,
+  RefreshCw,
+  Zap,
+  ArrowLeft, // Added for mobile back button
+} from "lucide-react";
+
+// --- Interfaces & Types ---
+
 interface Message {
   id?: number;
+  tempId?: string;
   conversationId: string;
   senderId: string;
   senderName: string;
   content: string;
   timestamp: number;
-  type: "text" | "file";
-  status: "sent" | "delivered" | "failed" | "pending";
-  fileInfo?: {
-    name: string;
-    size: number;
-    url?: string;
-    hash?: string;
-  };
-  isGroup?: boolean;
-  reactions?: { [key: string]: number };
+  type: "text" | "file-transfer";
+  status: "pending" | "sent" | "delivered" | "failed";
+  fileInfo?: FileInfo;
 }
 
-interface PeerData {
+interface FileInfo {
   id: string;
   name: string;
-  lastSeen: number;
-  status: "online" | "offline";
-  groups?: string[];
-  customAvatar?: string;
-  deviceInfo?: string;
-  unreadMessages?: number;
+  size: number;
+  type: string;
 }
 
 interface FileTransfer {
   id: string;
   name: string;
   size: number;
+  type: string;
+  status:
+    | "transferring"
+    | "completed"
+    | "failed"
+    | "receiving"
+    | "paused"
+    | "cancelled"
+    | "queued";
   progress: number;
-  data: ArrayBuffer[];
-  senderName: string;
-  conversationId: string;
-  status: "pending" | "transferring" | "completed" | "failed";
-  retryCount: number;
-  hash?: string;
+  direction: "incoming" | "outgoing";
+  speed?: number;
+  timeRemaining?: number;
+}
+
+interface StoredFile {
+  id: string;
+  blob: Blob;
+}
+
+interface PeerData {
+  id: string;
+  name: string;
+  status: "online" | "offline" | "connecting";
+  unreadCount: number;
+  lastSeen?: number;
+  avatar?: string;
 }
 
 interface UserProfile {
   id: string;
   name: string;
   avatar?: string;
-  preferences: {
-    theme: "light" | "dark";
-    autoDownload: boolean;
-    notifications: boolean;
-    maxPeers: number;
-  };
 }
 
-interface Group {
-  id: string;
-  name: string;
-  members: string[];
-}
+// --- State & Action Types for Reducer ---
+type ChatState = {
+  peers: Record<string, PeerData>;
+  messages: Record<string, Message[]>;
+  fileTransfers: Record<string, FileTransfer>;
+  selectedConversationId: string | null;
+};
 
-// Enhanced database schema with additional tables
+type ChatAction =
+  | { type: "INIT_STATE"; payload: { peers: PeerData[]; messages: Message[] } }
+  | { type: "SELECT_CONVERSATION"; payload: string | null }
+  | { type: "ADD_PEER"; payload: PeerData }
+  | {
+      type: "UPDATE_PEER_STATUS";
+      payload: { peerId: string; status: PeerData["status"] };
+    }
+  | { type: "ADD_MESSAGE"; payload: Message }
+  | {
+      type: "UPDATE_MESSAGE_STATUS";
+      payload: {
+        tempId: string;
+        newId: number;
+        status: Message["status"];
+        conversationId: string;
+      };
+    }
+  | { type: "INCREMENT_UNREAD"; payload: string }
+  | { type: "START_FILE_TRANSFER"; payload: FileTransfer }
+  | { type: "UPDATE_FILE_PROGRESS"; payload: { id: string; progress: number } }
+  | {
+      type: "FINISH_FILE_TRANSFER";
+      payload: { id: string; status: FileTransfer["status"] };
+    };
+
+// --- P2P Data Payload Type ---
+type PeerMessagePayload =
+  | { type: "profile-info"; payload: { id: string; name: string } }
+  | { type: "text"; payload: { content: string } }
+  | { type: "file-meta"; payload: FileInfo }
+  | { type: "file-chunk"; payload: { id: string; chunk: ArrayBuffer } }
+  | { type: "file-end"; payload: { id: string } };
+
+const CHUNK_SIZE = 256 * 1024;
+
+// --- Dexie DB Class ---
 class MessagingDB extends Dexie {
   messages!: Dexie.Table<Message, number>;
   peers!: Dexie.Table<PeerData, string>;
   profile!: Dexie.Table<UserProfile, string>;
-  fileTransfers!: Dexie.Table<FileTransfer, string>;
+  files!: Dexie.Table<StoredFile, string>;
 
   constructor() {
-    super("MessagingDB");
+    super("P2P_Chat_DB_v4");
     this.version(1).stores({
-      messages: "++id, conversationId, senderId, timestamp, status",
-      peers: "id, name, lastSeen, status",
-      profile: "id, name",
-      fileTransfers: "id, conversationId, status",
+      messages: "++id, tempId, conversationId, timestamp",
+      peers: "id, name",
+      profile: "id",
+      files: "id",
     });
   }
 }
 
 const db = new MessagingDB();
 
-// Constants
-const MAX_PEERS = 100;
-const MAX_RETRY_ATTEMPTS = 3;
-const CHUNK_SIZE = 65536; // Increased chunk size for better performance
-const HEARTBEAT_INTERVAL = 30000;
-const CONNECTION_TIMEOUT = 10000;
+// --- Utility Functions ---
+const generateNumericId = (): string =>
+  Math.floor(1000 + Math.random() * 9000).toString();
 
-const generatePeerId = () => {
-  // Generate a 4-digit numeric ID
-  return Math.floor(1000 + Math.random() * 9000).toString();
+const getOrGenerateUserId = (): string => {
+  const storedUserId = localStorage.getItem("userId");
+  if (storedUserId) return storedUserId;
+  const newUserId = generateNumericId();
+  localStorage.setItem("userId", newUserId);
+  return newUserId;
 };
 
-export default function Home() {
-  const [peerId, setPeerId] = useState<string>("");
-  const [displayName, setDisplayName] = useState("");
-  const [remotePeers, setRemotePeers] = useState<PeerData[]>([]);
-  const [newPeerId, setNewPeerId] = useState("");
-  const [groupId, setGroupId] = useState("");
-  const [isInGroup, setIsInGroup] = useState(false);
-  const [connectionStatus, setConnectionStatus] = useState("disconnected");
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [currentMessage, setCurrentMessage] = useState("");
-  const [files, setFiles] = useState<FileList | null>(null);
-  const [fileTransfers, setFileTransfers] = useState<Record<string, FileTransfer>>({});
-  const [autoDownload, setAutoDownload] = useState(true);
-  const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
-  const [peerConnectionCount, setPeerConnectionCount] = useState(0);
-  const [groups, setGroups] = useState<Group[]>([]);
-  const [activeGroup, setActiveGroup] = useState<string | null>(null);
-  const [conversationType, setConversationType] = useState<"group" | "individual">("individual");
+const formatBytes = (bytes: number, decimals: number = 2): string => {
+  if (bytes === 0) return "0 Bytes";
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + " " + sizes[i];
+};
 
-  const peerRef = useRef<Peer>();
-  const connectionsRef = useRef<Record<string, DataConnection>>({});
-  const chatScrollRef = useRef<HTMLDivElement>(null);
-  const heartbeatRef = useRef<NodeJS.Timeout>();
-  const { toast } = useToast();
+const getFileIcon = (type: string) => {
+  if (type.startsWith("image/")) return <Image className="h-4 w-4" />;
+  if (type.startsWith("video/")) return <Video className="h-4 w-4" />;
+  if (type.startsWith("audio/")) return <Music className="h-4 w-4" />;
+  if (type.includes("zip") || type.includes("rar") || type.includes("7z"))
+    return <Archive className="h-4 w-4" />;
+  return <FileText className="h-4 w-4" />;
+};
 
-  // Initialize user profile and peer ID
+const titleCase = (str: string) => str.charAt(0).toUpperCase() + str.slice(1);
+
+// --- Hooks ---
+
+function useUserProfile() {
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+
   useEffect(() => {
-    const initializeUser = async () => {
-      try {
-        // Try to load existing profile
-        const profiles = await db.profile.toArray();
-        let profile = profiles[0];
-
-        if (!profile) {
-          // Create new profile if none exists
-          const savedName = localStorage.getItem("displayName");
-          const name = savedName || prompt("Enter your display name:");
-          if (!name) return;
-
-          const newId = generatePeerId();
-          profile = {
-            id: newId,
-            name,
-            preferences: {
-              theme: "dark",
-              autoDownload: true,
-              notifications: true,
-              maxPeers: MAX_PEERS,
-            },
-          };
-
-          await db.profile.add(profile);
-          localStorage.setItem("displayName", name);
+    const loadProfile = async () => {
+      setIsLoading(true);
+      const userId = localStorage.getItem("userId");
+      if (userId) {
+        const userProfile = await db.profile.get(userId);
+        if (userProfile) {
+          setProfile(userProfile);
+          setIsLoading(false);
+          return;
         }
-
-        setDisplayName(profile.name);
-        setPeerId(profile.id);
-        setAutoDownload(profile.preferences.autoDownload);
-      } catch (error) {
-        console.error("Error initializing user:", error);
-        toast({
-          title: "Error",
-          description: "Failed to initialize user profile. Please try again.",
-          variant: "destructive",
-        });
       }
+      setIsLoading(false);
     };
-
-    initializeUser();
+    loadProfile();
   }, []);
 
-  // Initialize peer connection
-  useEffect(() => {
-    if (!displayName || !peerId) return;
-
-    const initializePeer = () => {
-      const peer = new Peer(peerId, {
-        config: {
-          iceServers: [
-            { urls: "stun:stun.l.google.com:19302" },
-            { urls: "stun:global.stun.twilio.com:3478" },
-          ],
-        },
-        debug: 2,
-      });
-
-      peer.on("open", async (id) => {
-        setConnectionStatus("ready");
-        await db.peers.put({
-          id,
-          name: displayName,
-          lastSeen: Date.now(),
-          status: "online",
-        });
-        reconnectToPeers();
-        sendPendingMessages();
-      });
-
-      peer.on("connection", handleNewConnection);
-      peer.on("error", handlePeerError);
-      peer.on("disconnected", handleDisconnect);
-      peer.on("close", () => {
-        if (peerRef.current) {
-          peerRef.current.destroy();
-        }
-      });
-
-      peerRef.current = peer;
-
-      // Start heartbeat
-      heartbeatRef.current = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL);
-
-      return () => {
-        clearInterval(heartbeatRef.current);
-        peer.destroy();
-      };
-    };
-
-    initializePeer();
-  }, [displayName, peerId]);
-
-  // Load conversation messages
-  useEffect(() => {
-    const loadConversation = async () => {
-      if (selectedConversation) {
-        try {
-          const messages = await db.messages
-            .where("conversationId")
-            .equals(selectedConversation)
-            .sortBy("timestamp");
-          setMessages(messages);
-
-          // Mark messages as delivered
-          await db.messages
-            .where("conversationId")
-            .equals(selectedConversation)
-            .modify({ status: "delivered" });
-        } catch (error) {
-          console.error("Error loading conversation:", error);
-          toast({
-            title: "Error",
-            description: "Failed to load conversation messages.",
-            variant: "destructive",
-          });
-        }
-      }
-    };
-
-    loadConversation();
-  }, [selectedConversation]);
-
-  // Scroll to bottom when new messages arrive
-  useEffect(() => {
-    if (chatScrollRef.current) {
-      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
-    }
-  }, [messages]);
-
-  const sendHeartbeat = () => {
-    Object.values(connectionsRef.current).forEach((conn) => {
-      conn.send({
-        type: "heartbeat",
-        timestamp: Date.now(),
-      });
-    });
+  const createUserProfile = async (name: string): Promise<UserProfile> => {
+    if (!name.trim()) throw new Error("Display name cannot be empty.");
+    const userId = getOrGenerateUserId();
+    const newProfile: UserProfile = { id: userId, name };
+    await db.profile.put(newProfile);
+    setProfile(newProfile);
+    return newProfile;
   };
 
-  const handleNewConnection = async (conn: DataConnection) => {
-    if (peerConnectionCount >= MAX_PEERS || connectionsRef.current[conn.peer]) {
-      conn.close();
-      toast({
-        title: "Connection Limit Reached",
-        description: `Maximum number of peers (${MAX_PEERS}) reached or already connected.`,
-        variant: "destructive",
-      });
-      return;
+  return { profile, isLoading, createUserProfile };
+}
+
+function useNotifications() {
+  const [permission, setPermission] =
+    useState<NotificationPermission>("default");
+
+  useEffect(() => {
+    if ("Notification" in window) {
+      setPermission(Notification.permission);
     }
+  }, []);
 
-    // Set connection timeout
-    const timeout = setTimeout(() => {
-      if (conn.open) {
-        conn.close();
-        handleConnectionError(conn.peer, new Error("Connection timeout"));
+  const requestPermission = useCallback(() => {
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission().then(setPermission);
+    }
+  }, []);
+
+  const showNotification = useCallback(
+    (title: string, options: NotificationOptions) => {
+      if (document.hidden && permission === "granted") {
+        const notification = new Notification(title, {
+          ...options,
+          icon: "/favicon.ico",
+          badge: "/favicon.ico",
+        });
+        notification.onclick = () => window.focus();
       }
-    }, CONNECTION_TIMEOUT);
+    },
+    [permission]
+  );
 
-    conn.on("open", () => clearTimeout(timeout));
+  return { requestPermission, showNotification };
+}
 
-    conn.on("open", async () => {
-      conn.send({ type: "profile", id: peerId, name: displayName, deviceInfo: navigator.userAgent });
+// --- Reducer with Strict Typing ---
+const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
+  const { type, payload } = action;
 
-      try {
-        const existingPeer = await db.peers.get(conn.peer);
-        if (!existingPeer) {
-          await db.peers.add({
-            id: conn.peer,
-            name: conn.peer,
-            lastSeen: Date.now(),
-            status: "online",
-          });
-        } else {
-          await db.peers.update(conn.peer, {
-            lastSeen: Date.now(),
-            status: "online",
-          });
-        }
+  switch (type) {
+    case "INIT_STATE": {
+      const messagesByConv = payload.messages.reduce(
+        (acc: Record<string, Message[]>, msg) => {
+          if (!acc[msg.conversationId]) acc[msg.conversationId] = [];
+          acc[msg.conversationId].push(msg);
+          return acc;
+        },
+        {}
+      );
+      const peersById = payload.peers.reduce(
+        (acc: Record<string, PeerData>, peer) => {
+          acc[peer.id] = peer;
+          return acc;
+        },
+        {}
+      );
+      return { ...state, peers: peersById, messages: messagesByConv };
+    }
+    case "SELECT_CONVERSATION": {
+      if (payload && state.peers[payload]) {
+        return {
+          ...state,
+          selectedConversationId: payload,
+          peers: {
+            ...state.peers,
+            [payload]: { ...state.peers[payload], unreadCount: 0 },
+          },
+        };
+      }
+      return { ...state, selectedConversationId: payload };
+    }
+    case "ADD_PEER":
+      return {
+        ...state,
+        peers: { ...state.peers, [payload.id]: payload },
+      };
+    case "UPDATE_PEER_STATUS": {
+      if (!state.peers[payload.peerId]) return state;
+      return {
+        ...state,
+        peers: {
+          ...state.peers,
+          [payload.peerId]: {
+            ...state.peers[payload.peerId],
+            status: payload.status,
+            lastSeen:
+              payload.status === "offline"
+                ? Date.now()
+                : state.peers[payload.peerId].lastSeen,
+          },
+        },
+      };
+    }
+    case "ADD_MESSAGE": {
+      const { conversationId } = payload;
+      const newMessages = [...(state.messages[conversationId] ?? []), payload];
+      return {
+        ...state,
+        messages: { ...state.messages, [conversationId]: newMessages },
+      };
+    }
+    case "UPDATE_MESSAGE_STATUS": {
+      const { tempId, newId, status, conversationId } = payload;
+      if (!state.messages[conversationId]) return state;
 
+      const updatedConvMessages = state.messages[conversationId].map((m) =>
+        m.tempId === tempId ? { ...m, status, id: newId, tempId: undefined } : m
+      );
+
+      return {
+        ...state,
+        messages: { ...state.messages, [conversationId]: updatedConvMessages },
+      };
+    }
+    case "INCREMENT_UNREAD": {
+      if (!state.peers[payload] || state.selectedConversationId === payload)
+        return state;
+      const currentUnread = state.peers[payload].unreadCount ?? 0;
+      return {
+        ...state,
+        peers: {
+          ...state.peers,
+          [payload]: {
+            ...state.peers[payload],
+            unreadCount: currentUnread + 1,
+          },
+        },
+      };
+    }
+    case "START_FILE_TRANSFER":
+      return {
+        ...state,
+        fileTransfers: { ...state.fileTransfers, [payload.id]: payload },
+      };
+    case "UPDATE_FILE_PROGRESS": {
+      if (!state.fileTransfers[payload.id]) return state;
+      return {
+        ...state,
+        fileTransfers: {
+          ...state.fileTransfers,
+          [payload.id]: {
+            ...state.fileTransfers[payload.id],
+            progress: payload.progress,
+          },
+        },
+      };
+    }
+    case "FINISH_FILE_TRANSFER": {
+      if (!state.fileTransfers[payload.id]) return state;
+      return {
+        ...state,
+        fileTransfers: {
+          ...state.fileTransfers,
+          [payload.id]: {
+            ...state.fileTransfers[payload.id],
+            status: payload.status,
+            progress:
+              payload.status === "completed"
+                ? 100
+                : state.fileTransfers[payload.id].progress,
+          },
+        },
+      };
+    }
+    default:
+      return state;
+  }
+};
+
+// --- usePeer Hook with correct PeerJS types ---
+function usePeer({
+  profile,
+  onDataReceived,
+  onPeerConnected,
+  onPeerDisconnected,
+}: {
+  profile: UserProfile | null;
+  onDataReceived: (peerId: string, data: PeerMessagePayload) => void;
+  onPeerConnected: (peerId: string) => void;
+  onPeerDisconnected: (peerId: string, error?: boolean) => void;
+}) {
+  const [peer, setPeer] = useState<Peer | null>(null);
+  const [isPeerReady, setIsPeerReady] = useState<boolean>(false);
+  const connectionsRef = useRef<Record<string, DataConnection>>({});
+  const { toast } = useToast();
+
+  useEffect(() => {
+    if (!profile || peer) return;
+
+    const newPeer = new Peer(profile.id);
+    setPeer(newPeer);
+
+    newPeer.on("open", (id) => {
+      console.log("My peer ID is: " + id);
+      setIsPeerReady(true);
+    });
+
+    newPeer.on("connection", (conn) => setupConnection(conn));
+
+    newPeer.on("error", (err) => {
+      console.error("PeerJS global error:", err);
+      if (err.type === "peer-unavailable") {
+        toast({
+          title: "Peer not found",
+          description:
+            "The peer ID you are trying to connect to does not exist.",
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Connection Error",
+          description: err.message,
+          variant: "destructive",
+        });
+      }
+    });
+
+    return () => {
+      newPeer.destroy();
+    };
+  }, [profile]);
+
+  const setupConnection = useCallback(
+    (conn: DataConnection) => {
+      conn.on("open", () => {
+        console.log(`Connection established with ${conn.peer}`);
         connectionsRef.current[conn.peer] = conn;
-        setupConnectionListeners(conn);
-        setPeerConnectionCount((count) => count + 1);
-        setRemotePeers((prev) => [
-          ...prev,
-          { id: conn.peer, name: conn.peer, status: "online", lastSeen: Date.now(), unreadMessages: 0 },
-        ]);
-        setConnectionStatus("connected");
-      } catch (error) {
-        console.error("Error handling new connection:", error);
-        handleConnectionError(conn.peer, error);
+        onPeerConnected(conn.peer);
+        if (profile) {
+          conn.send({
+            type: "profile-info",
+            payload: { id: profile.id, name: profile.name },
+          });
+        }
+      });
+
+      conn.on("data", (data: unknown) =>
+        onDataReceived(conn.peer, data as PeerMessagePayload)
+      );
+
+      const handleClose = () => {
+        console.log(`Connection closed with ${conn.peer}`);
+        delete connectionsRef.current[conn.peer];
+        onPeerDisconnected(conn.peer);
+      };
+
+      conn.on("close", handleClose);
+      conn.on("error", (err) => {
+        console.error(`Connection error with ${conn.peer}:`, err);
+        delete connectionsRef.current[conn.peer];
+        onPeerDisconnected(conn.peer, true);
+      });
+    },
+    [profile, onDataReceived, onPeerConnected, onPeerDisconnected]
+  );
+
+  const connectToPeer = useCallback(
+    (remotePeerId: string) => {
+      if (!peer || !isPeerReady || !remotePeerId) {
+        console.warn("Peer not ready or no remotePeerId provided.");
+        onPeerDisconnected(remotePeerId, true);
+        return;
+      }
+      if (connectionsRef.current[remotePeerId]?.open) {
+        console.log(`Connection to ${remotePeerId} is already open.`);
+        return;
+      }
+      console.log(`Attempting to connect to ${remotePeerId}`);
+      const conn = peer.connect(remotePeerId, { reliable: true });
+      setupConnection(conn);
+    },
+    [peer, isPeerReady, setupConnection, onPeerDisconnected]
+  );
+
+  const reconnectToPastPeers = useCallback(async () => {
+    if (!profile) return;
+    const pastPeers = await db.peers.toArray();
+    pastPeers.forEach((peerData) => {
+      if (peerData.id !== profile.id) {
+        connectToPeer(peerData.id);
       }
     });
+  }, [connectToPeer, profile]);
 
-    setupConnectionListeners(conn);
+  const sendMessageToPeer = useCallback(
+    (peerId: string, data: PeerMessagePayload): boolean => {
+      const conn = connectionsRef.current[peerId];
+      if (conn?.open) {
+        conn.send(data);
+        return true;
+      }
+      console.warn(`Could not send message to ${peerId}: connection not open.`);
+      return false;
+    },
+    []
+  );
+
+  return {
+    peerId: profile?.id,
+    isPeerReady,
+    connectToPeer,
+    reconnectToPastPeers,
+    sendMessageToPeer,
   };
+}
 
-  const setupConnectionListeners = (conn: DataConnection) => {
-    conn.on("data", async (data: any) => {
-      try {
-        if (data.type === "profile") {
-          await db.peers.update(data.id, {
-            name: data.name,
-            deviceInfo: data.deviceInfo,
+// --- Main Chat Logic Hook ---
+function useChatManager(profile: UserProfile | null) {
+  const initialState: ChatState = {
+    peers: {},
+    messages: {},
+    fileTransfers: {},
+    selectedConversationId: null,
+  };
+  const [state, dispatch] = useReducer(chatReducer, initialState);
+  const { toast } = useToast();
+  const { requestPermission, showNotification } = useNotifications();
+  const incomingFileBuffers = useRef<
+    Record<string, { metadata: FileInfo; chunks: ArrayBuffer[] }>
+  >({});
+
+  const handleDataReceived = useCallback(
+    async (peerId: string, data: PeerMessagePayload) => {
+      if (!profile) return;
+      const peerName = state.peers[peerId]?.name ?? peerId;
+
+      switch (data.type) {
+        case "profile-info": {
+          const peerProfile = data.payload;
+          const existingPeer = await db.peers.get(peerProfile.id);
+          const peerUpdateData: PeerData = {
+            id: peerProfile.id,
+            name: peerProfile.name,
             status: "online",
-          });
-          setRemotePeers((prev) =>
-            prev.map((p) =>
-              p.id === data.id
-                ? { ...p, name: data.name, deviceInfo: data.deviceInfo }
-                : p
-            )
-          );
-        } else if (data.type === "heartbeat") {
-          await db.peers.update(conn.peer, { lastSeen: data.timestamp });
-        } else if (data.type === "groupUpdate") {
-          switch (data.action) {
-            case "create":
-              setGroups((prev) => [...prev, data.group]);
-              break;
-            case "join":
-              setGroups((prev) =>
-                prev.map((g) =>
-                  g.id === data.groupId
-                    ? { ...g, members: [...g.members, data.memberId] }
-                    : g
-                )
-              );
-              break;
-          }
-        } else {
-          handleIncomingData(conn.peer, data);
-        }
-      } catch (error) {
-        console.error("Error processing incoming data:", error);
-        toast({
-          title: "Error",
-          description: "Failed to process incoming data.",
-          variant: "destructive",
-        });
-      }
-    });
-
-    conn.on("close", () => handleConnectionClose(conn.peer));
-    conn.on("error", (error) => handleConnectionError(conn.peer, error));
-  };
-
-  const handleIncomingData = async (senderId: string, data: any) => {
-    const conversationId = data.groupId || selectedConversation || senderId;
-
-    try {
-      if (data.type === "text") {
-        const message: Message = {
-          conversationId,
-          senderId,
-          senderName:
-            remotePeers.find((p) => p.id === senderId)?.name || senderId,
-          content: data.content,
-          timestamp: Date.now(),
-          type: "text",
-          status: "delivered",
-          isGroup: !!data.groupId,
-        };
-
-        await db.messages.add(message);
-        setMessages((prev) => [...prev, message]);
-      } else if (data.type === "file-start") {
-        const { id, name, size, hash } = data;
-        setFileTransfers((prev) => ({
-          ...prev,
-          [id]: {
-            id,
-            name,
-            size,
-            hash,
-            progress: 0,
-            data: [],
-            senderName:
-              remotePeers.find((p) => p.id === senderId)?.name || senderId,
-            conversationId,
-            status: "pending",
-            retryCount: 0,
-          },
-        }));
-
-        // Acknowledge file transfer start
-        const conn = connectionsRef.current[senderId];
-        if (conn) {
-          conn.send({
-            type: "file-ack",
-            id,
-            status: "ready",
-          });
-        }
-      } else if (data.type === "file-chunk") {
-        await handleIncomingFileChunk(data, senderId);
-      } else if (data.type === "file-end") {
-        await finalizeFileTransfer(data.id, senderId);
-      }
-    } catch (error) {
-      console.error("Error handling incoming data:", error);
-      toast({
-        title: "Error",
-        description: "Failed to process incoming data",
-        variant: "destructive",
-      });
-    }
-  };
-
-  const handleIncomingFileChunk = async (
-    data: { id: string; chunk: ArrayBuffer; index: number },
-    senderId: string
-  ) => {
-    setFileTransfers((prev) => {
-      const transfer = prev[data.id];
-      if (!transfer) return prev;
-
-      const newData = [...transfer.data];
-      newData[data.index] = data.chunk;
-
-      const chunksReceived = newData.filter(Boolean).length;
-      const totalChunks = Math.ceil(transfer.size / CHUNK_SIZE);
-      const progress = (chunksReceived / totalChunks) * 100;
-
-      const updatedTransfer = {
-        ...transfer,
-        data: newData,
-        progress,
-        status: progress === 100 ? "completed" : "transferring",
-      };
-
-      // Auto download if enabled and transfer is complete
-      if (progress === 100 && autoDownload) {
-        downloadFile(updatedTransfer);
-      }
-
-      return { ...prev, [data.id]: updatedTransfer };
-    });
-
-    // Acknowledge chunk receipt
-    const conn = connectionsRef.current[senderId];
-    if (conn) {
-      conn.send({
-        type: "chunk-ack",
-        id: data.id,
-        index: data.index,
-      });
-    }
-  };
-
-  const finalizeFileTransfer = async (transferId: string, senderId: string) => {
-    const transfer = fileTransfers[transferId];
-    if (!transfer) return;
-
-    try {
-      // Verify file hash if provided
-      if (transfer.hash) {
-        const blob = new Blob(transfer.data);
-        const arrayBuffer = await blob.arrayBuffer();
-        const calculatedHash = await crypto.subtle.digest(
-          "SHA-256",
-          arrayBuffer
-        );
-        const hashMatches = compareHashes(calculatedHash, transfer.hash);
-
-        if (!hashMatches) {
-          throw new Error("File hash verification failed");
-        }
-      }
-
-      // Save successful transfer to database
-      await db.fileTransfers.put({
-        ...transfer,
-        status: "completed",
-      });
-
-      // Create message for the file
-      const message: Message = {
-        conversationId: transfer.conversationId,
-        senderId,
-        senderName: transfer.senderName,
-        content: `File: ${transfer.name}`,
-        timestamp: Date.now(),
-        type: "file",
-        status: "delivered",
-        fileInfo: {
-          name: transfer.name,
-          size: transfer.size,
-          hash: transfer.hash,
-        },
-      };
-
-      await db.messages.add(message);
-      setMessages((prev) => [...prev, message]);
-
-      // Clean up transfer data
-      setFileTransfers((prev) => {
-        const { [transferId]: _, ...rest } = prev;
-        return rest;
-      });
-    } catch (error) {
-      console.error("Error finalizing file transfer:", error);
-      handleFileTransferError(transferId, senderId, error);
-    }
-  };
-
-  const handleFileTransferError = async (
-    transferId: string,
-    senderId: string,
-    error: any
-  ) => {
-    setFileTransfers((prev) => {
-      const transfer = prev[transferId];
-      if (!transfer) return prev;
-
-      if (transfer.retryCount < MAX_RETRY_ATTEMPTS) {
-        // Retry transfer
-        const conn = connectionsRef.current[senderId];
-        if (conn) {
-          conn.send({
-            type: "file-retry",
-            id: transferId,
-          });
-        }
-
-        return {
-          ...prev,
-          [transferId]: {
-            ...transfer,
-            status: "pending",
-            retryCount: transfer.retryCount + 1,
-          },
-        };
-      } else {
-        // Mark as failed after max retries
-        toast({
-          title: "File Transfer Failed",
-          description: `Failed to receive file ${transfer.name} after ${MAX_RETRY_ATTEMPTS} attempts`,
-          variant: "destructive",
-        });
-
-        return {
-          ...prev,
-          [transferId]: {
-            ...transfer,
-            status: "failed",
-          },
-        };
-      }
-    });
-  };
-
-  const sendMessage = async () => {
-    if (!selectedConversation || !currentMessage.trim()) return;
-
-    const isGroup = groups.some((g) => g.id === selectedConversation);
-    const message: Message = {
-      conversationId: selectedConversation,
-      senderId: peerId,
-      senderName: displayName,
-      content: currentMessage.trim(),
-      timestamp: Date.now(),
-      type: "text",
-      status: "sent",
-      isGroup,
-    };
-
-    try {
-      await db.messages.add(message);
-      setMessages((prev) => [...prev, message]);
-
-      if (isGroup) {
-        // Send to all group members
-        const group = groups.find((g) => g.id === selectedConversation);
-        group?.members.forEach((memberId) => {
-          if (memberId !== peerId) {
-            const conn = connectionsRef.current[memberId];
-            if (conn) {
-              conn.send({
-                type: "text",
-                content: message.content,
-                groupId: selectedConversation,
-              });
-            }
-          }
-        });
-      } else {
-        // Direct message
-        const conn = connectionsRef.current[selectedConversation];
-        if (conn) {
-          conn.send({
-            type: "text",
-            content: message.content,
-          });
-        }
-      }
-      setCurrentMessage("");
-    } catch (error) {
-      console.error("Error sending message:", error);
-      toast({
-        title: "Error",
-        description: "Failed to send message",
-        variant: "destructive",
-      });
-    }
-  };
-
-  const handleFileUpload = async (files: FileList) => {
-    if (!selectedConversation) return;
-
-    try {
-      let dataToSend: Blob;
-      let fileName: string;
-
-      if (files.length > 1 || files[0].webkitRelativePath) {
-        dataToSend = await zipFiles(Array.from(files));
-        fileName = "transfer.zip";
-      } else {
-        dataToSend = files[0];
-        fileName = files[0].name;
-      }
-
-      const fileId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      const arrayBuffer = await dataToSend.arrayBuffer();
-      const hash = await crypto.subtle.digest("SHA-256", arrayBuffer);
-      const hashString = Array.from(new Uint8Array(hash))
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("");
-
-      // Initialize file transfer
-      const totalChunks = Math.ceil(dataToSend.size / CHUNK_SIZE);
-      const chunks: ArrayBuffer[] = [];
-
-      // Split file into chunks
-      for (let i = 0; i < totalChunks; i++) {
-        const chunk = dataToSend.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-        chunks.push(await chunk.arrayBuffer());
-      }
-
-      // Send file info to the selected conversation peer only
-      const conn = connectionsRef.current[selectedConversation];
-      if (conn) {
-        conn.send({
-          type: "file-start",
-          id: fileId,
-          name: fileName,
-          size: dataToSend.size,
-          hash: hashString,
-        });
-      }
-
-      // Track local progress
-      setFileTransfers((prev) => ({
-        ...prev,
-        [fileId]: {
-          id: fileId,
-          name: fileName,
-          size: dataToSend.size,
-          progress: 0,
-          data: [],
-          senderName: displayName,
-          conversationId: selectedConversation,
-          status: "transferring",
-          retryCount: 0,
-          hash: hashString,
-        },
-      }));
-
-      // Send chunks with acknowledgment
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-        await sendChunkWithRetry(fileId, chunk, i);
-
-        setFileTransfers((prev) => ({
-          ...prev,
-          [fileId]: {
-            ...prev[fileId],
-            progress: ((i + 1) / chunks.length) * 100,
-          },
-        }));
-      }
-
-      // Send file completion message
-      if (conn) {
-        conn.send({
-          type: "file-end",
-          id: fileId,
-        });
-      }
-
-      setFiles(null);
-    } catch (error) {
-      console.error("Error uploading file:", error);
-      toast({
-        title: "Error",
-        description: "Failed to upload file",
-        variant: "destructive",
-      });
-    }
-  };
-
-  const sendChunkWithRetry = async (
-    fileId: string,
-    chunk: ArrayBuffer,
-    index: number,
-    retryCount = 0
-  ): Promise<void> => {
-    try {
-      const conn = connectionsRef.current[selectedConversation];
-      if (conn) {
-        const sendPromise = new Promise<void>((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            reject(new Error("Chunk send timeout"));
-          }, 5000);
-
-          conn.send({
-            type: "file-chunk",
-            id: fileId,
-            chunk,
-            index,
-          });
-
-          // Wait for acknowledgment
-          const handleAck = (data: any) => {
-            if (
-              data.type === "chunk-ack" &&
-              data.id === fileId &&
-              data.index === index
-            ) {
-              clearTimeout(timeout);
-              conn.off("data", handleAck);
-              resolve();
-            }
+            unreadCount: existingPeer?.unreadCount ?? 0,
           };
 
-          conn.on("data", handleAck);
-        });
-
-        await sendPromise;
-      }
-    } catch (error) {
-      if (retryCount < MAX_RETRY_ATTEMPTS) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        return sendChunkWithRetry(fileId, chunk, index, retryCount + 1);
-      }
-      throw error;
-    }
-  };
-
-  const downloadFile = async (transfer: FileTransfer) => {
-    try {
-      const blob = new Blob(transfer.data);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = transfer.name;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-
-      setFileTransfers((prev) => {
-        const { [transfer.id]: _, ...rest } = prev;
-        return rest;
-      });
-
-      toast({
-        title: "File Downloaded",
-        description: `${transfer.name} has been downloaded successfully.`,
-      });
-    } catch (error) {
-      console.error("Error downloading file:", error);
-      toast({
-        title: "Error",
-        description: "Failed to download file",
-        variant: "destructive",
-      });
-    }
-  };
-
-  const handleDisconnect = async () => {
-    try {
-      setConnectionStatus("disconnected");
-      // Update peer status in database
-      await db.peers
-        .where("status")
-        .equals("online")
-        .modify({ status: "offline" });
-
-      // Attempt to reconnect
-      setTimeout(() => {
-        if (peerRef.current) {
-          peerRef.current.reconnect();
+          await db.peers.put(peerUpdateData);
+          dispatch({ type: "ADD_PEER", payload: peerUpdateData });
+          break;
         }
-      }, 5000);
-    } catch (error) {
-      console.error("Error handling disconnect:", error);
-    }
-  };
+        case "text": {
+          const newTextMsg: Message = {
+            conversationId: peerId,
+            senderId: peerId,
+            senderName: peerName,
+            content: data.payload.content,
+            timestamp: Date.now(),
+            type: "text",
+            status: "delivered",
+          };
+          await db.messages.add(newTextMsg);
+          dispatch({ type: "ADD_MESSAGE", payload: newTextMsg });
+          dispatch({ type: "INCREMENT_UNREAD", payload: peerId });
+          showNotification(`New message from ${peerName}`, {
+            body: data.payload.content,
+          });
+          break;
+        }
+        case "file-meta": {
+          const metadata: FileInfo = data.payload;
+          incomingFileBuffers.current[metadata.id] = { metadata, chunks: [] };
+          dispatch({
+            type: "START_FILE_TRANSFER",
+            payload: {
+              ...metadata,
+              status: "receiving",
+              progress: 0,
+              direction: "incoming",
+            },
+          });
+          const newFileMsg: Message = {
+            conversationId: peerId,
+            senderId: peerId,
+            senderName: peerName,
+            content: `Receiving file: ${metadata.name}`,
+            timestamp: Date.now(),
+            type: "file-transfer",
+            status: "delivered",
+            fileInfo: metadata,
+          };
+          const newId = await db.messages.add(newFileMsg);
+          dispatch({
+            type: "ADD_MESSAGE",
+            payload: { ...newFileMsg, id: newId },
+          });
+          dispatch({ type: "INCREMENT_UNREAD", payload: peerId });
+          showNotification(`Incoming file from ${peerName}`, {
+            body: `${metadata.name} (${formatBytes(metadata.size)})`,
+          });
+          break;
+        }
+        case "file-chunk": {
+          const { id, chunk } = data.payload;
+          const transfer = incomingFileBuffers.current[id];
+          if (transfer) {
+            transfer.chunks.push(chunk);
+            const receivedSize = transfer.chunks.reduce(
+              (acc, c) => acc + c.byteLength,
+              0
+            );
+            const progress = (receivedSize / transfer.metadata.size) * 100;
+            dispatch({
+              type: "UPDATE_FILE_PROGRESS",
+              payload: { id, progress },
+            });
+          }
+          break;
+        }
+        case "file-end": {
+          const { id } = data.payload;
+          const transfer = incomingFileBuffers.current[id];
+          if (transfer) {
+            const fileBlob = new Blob(transfer.chunks, {
+              type: transfer.metadata.type,
+            });
+            if (fileBlob.size !== transfer.metadata.size) {
+              console.error(
+                `File corrupted: size mismatch for ${transfer.metadata.name}`
+              );
+              dispatch({
+                type: "FINISH_FILE_TRANSFER",
+                payload: { id, status: "failed" },
+              });
+              toast({
+                title: "File Transfer Failed",
+                description: `${transfer.metadata.name} was corrupted.`,
+                variant: "destructive",
+              });
+            } else {
+              await db.files.put({ id: id, blob: fileBlob });
+              dispatch({
+                type: "FINISH_FILE_TRANSFER",
+                payload: { id, status: "completed" },
+              });
+              toast({
+                title: "File Received",
+                description: `${transfer.metadata.name} has been downloaded.`,
+              });
+            }
+            delete incomingFileBuffers.current[id];
+          }
+          break;
+        }
+      }
+    },
+    [profile, state.peers, toast, showNotification]
+  );
 
-  const handlePeerError = (error: any) => {
-    console.error("Peer connection error:", error);
-    toast({
-      title: "Connection Error",
-      description:
-        "An error occurred with the peer connection. Please try again.",
-      variant: "destructive",
-    });
-  };
+  const handlePeerConnected = useCallback(
+    async (peerId: string) => {
+      await db.peers.update(peerId, { status: "online" });
+      dispatch({
+        type: "UPDATE_PEER_STATUS",
+        payload: { peerId, status: "online" },
+      });
+      const peerName = state.peers[peerId]?.name ?? peerId;
+      toast({
+        title: "Peer Connected",
+        description: `You are now connected to ${peerName}.`,
+      });
+      requestPermission();
+    },
+    [state.peers, toast, requestPermission]
+  );
 
-  const handleConnectionClose = async (peerId: string) => {
-    try {
-      delete connectionsRef.current[peerId];
-      setPeerConnectionCount((count) => count - 1);
+  const handlePeerDisconnected = useCallback(
+    async (peerId: string, hadError?: boolean) => {
+      // Don't do anything if we don't know about this peer
+      if (!state.peers[peerId]) return;
 
       await db.peers.update(peerId, {
         status: "offline",
         lastSeen: Date.now(),
       });
-      setRemotePeers((prev) =>
-        prev.map((peer) =>
-          peer.id === peerId ? { ...peer, status: "offline" } : peer
-        )
-      );
-
-      if (Object.keys(connectionsRef.current).length === 0) {
-        setConnectionStatus("ready");
+      dispatch({
+        type: "UPDATE_PEER_STATUS",
+        payload: { peerId, status: "offline" },
+      });
+      const peerName = state.peers[peerId]?.name ?? peerId;
+      if (hadError) {
+        toast({
+          title: "Connection Failed",
+          description: `Could not connect to ${peerName}. Peer may be offline or unreachable.`,
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Peer Disconnected",
+          description: `Connection lost with ${peerName}.`,
+          variant: "destructive",
+        });
       }
-    } catch (error) {
-      console.error("Error handling connection close:", error);
-    }
-  };
+    },
+    [state.peers, toast]
+  );
 
-  const handleConnectionError = (peerId: string, error: any) => {
-    console.error("Connection error:", error);
-    toast({
-      title: "Connection Error",
-      description: `An error occurred with the connection to ${peerId}. Please try reconnecting.`,
-      variant: "destructive",
-    });
-  };
+  const peerHook = usePeer({
+    profile,
+    onDataReceived: handleDataReceived,
+    onPeerConnected: handlePeerConnected,
+    onPeerDisconnected: handlePeerDisconnected,
+  });
 
-  // Utility functions
-  const compareHashes = (hash1: ArrayBuffer, hash2: string): boolean => {
-    const hash1String = Array.from(new Uint8Array(hash1))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
-    return hash1String === hash2;
-  };
-
-  const isGroupConnection = (conn: Peer.DataConnection): boolean => {
-    return activeGroup && conn.peer === activeGroup;
-  };
-
-  const createGroup = () => {
-    const newGroupId = generatePeerId();
-    const newGroup: Group = {
-      id: newGroupId,
-      name: `Group ${newGroupId.slice(0, 4)}`,
-      members: [peerId],
-    };
-
-    setGroups((prev) => [...prev, newGroup]);
-    setSelectedConversation(newGroupId);
-    setActiveGroup(newGroupId);
-    setConversationType("group");
-
-    // Notify existing connections
-    Object.values(connectionsRef.current).forEach((conn) => {
-      conn.send({
-        type: "groupUpdate",
-        action: "create",
-        group: newGroup,
-      });
-    });
-  };
-
-  const joinGroup = (inviterId: string, groupId: string) => {
-    const conn = connectionsRef.current[inviterId];
-    if (!conn) return;
-
-    conn.send({
-      type: "groupJoin",
-      groupId,
-    });
-  };
-
-  const leaveGroup = () => {
-    Object.values(connectionsRef.current).forEach((conn) => conn.close());
-    setGroups((prev) => prev.filter((g) => g.id !== activeGroup));
-    setSelectedConversation(null);
-    setActiveGroup(null);
-    setConversationType("individual");
-    setConnectionStatus("ready");
-  };
-
-  const connectToPeer = (id: string = newPeerId) => {
-    if (!peerRef.current || !id || connectionsRef.current[id]) return;
-    const conn = peerRef.current.connect(id);
-    conn.on("open", () => {
-      setupConnectionListeners(conn);
-      connectionsRef.current[id] = conn;
-      setRemotePeers((prev) => [
-        ...prev,
-        { id, name: id, status: "online", lastSeen: Date.now(), unreadMessages: 0 },
+  useEffect(() => {
+    const loadInitialData = async () => {
+      const [peers, messages] = await Promise.all([
+        db.peers.toArray(),
+        db.messages.toArray(),
       ]);
-      setNewPeerId("");
-      setConnectionStatus("connected");
-      toast({
-        title: "Connected",
-        description: `Successfully connected to peer ${id}.`,
-      });
-    });
-  };
+      peers.forEach((p: PeerData) => (p.status = "offline"));
+      dispatch({ type: "INIT_STATE", payload: { peers, messages } });
+    };
+    loadInitialData();
+  }, []);
 
-  const selectConversation = (id: string, isGroup?: boolean) => {
-    setSelectedConversation(id);
-    if (isGroup) {
-      setActiveGroup(id);
-      setConversationType("group");
+  useEffect(() => {
+    if (peerHook.isPeerReady) {
+      peerHook.reconnectToPastPeers();
+    }
+  }, [peerHook.isPeerReady, peerHook.reconnectToPastPeers]);
+
+  const connectToPeer = useCallback(
+    (peerId: string) => {
+      if (!peerId) return;
+      const peerData = state.peers[peerId];
+      if (peerData?.status === "online") {
+        toast({
+          title: "Already Connected",
+          description: `You are already connected to ${peerData.name}.`,
+        });
+        return;
+      }
+      if (peerData?.status === "connecting") {
+        toast({
+          title: "Connection in Progress",
+          description: `Already attempting to connect to ${peerData.name}.`,
+        });
+        return;
+      }
+      dispatch({
+        type: "UPDATE_PEER_STATUS",
+        payload: { peerId, status: "connecting" },
+      });
+      peerHook.connectToPeer(peerId);
+    },
+    [state.peers, peerHook.connectToPeer, toast]
+  );
+
+  const addAndConnectToPeer = async (peerId: string) => {
+    if (!profile || !peerId || peerId === profile.id) return;
+    const existingPeer = await db.peers.get(peerId);
+    if (existingPeer) {
+      connectToPeer(peerId);
     } else {
-      setConversationType("individual");
+      const newPeer: PeerData = {
+        id: peerId,
+        name: `Peer ${peerId}`,
+        status: "connecting",
+        unreadCount: 0,
+      };
+      await db.peers.put(newPeer);
+      dispatch({ type: "ADD_PEER", payload: newPeer });
+      connectToPeer(peerId);
     }
-    setMessages([]); // Clear messages when switching peers
   };
 
-  const reconnectToPeers = async () => {
-    try {
-      const peers = await db.peers.toArray();
-      peers.forEach((peer) => {
-        if (peer.status === "online") {
-          connectToPeer(peer.id);
-        }
+  const selectConversation = (peerId: string | null) => {
+    dispatch({ type: "SELECT_CONVERSATION", payload: peerId });
+  };
+
+  const sendMessage = async (content: string) => {
+    if (!profile || !state.selectedConversationId || !content.trim()) return;
+    const tempId = crypto.randomUUID();
+    const convId = state.selectedConversationId;
+    const message: Message = {
+      tempId,
+      conversationId: convId,
+      senderId: profile.id,
+      senderName: profile.name,
+      content,
+      timestamp: Date.now(),
+      type: "text",
+      status: "pending",
+    };
+    dispatch({ type: "ADD_MESSAGE", payload: message });
+
+    const success = peerHook.sendMessageToPeer(convId, {
+      type: "text",
+      payload: { content },
+    });
+
+    const newStatus = success ? "sent" : "failed";
+    const { tempId: _t, ...dbMessage } = message;
+    const newId = await db.messages.add({ ...dbMessage, status: newStatus });
+
+    dispatch({
+      type: "UPDATE_MESSAGE_STATUS",
+      payload: { tempId, newId, status: newStatus, conversationId: convId },
+    });
+
+    if (!success)
+      toast({
+        title: "Message Failed",
+        description: "Could not send message. Peer may be disconnected.",
+        variant: "destructive",
       });
-    } catch (error) {
-      console.error("Error reconnecting to peers:", error);
-    }
   };
 
-  const sendPendingMessages = async () => {
-    try {
-      const pendingMessages = await db.messages
-        .where("status")
-        .equals("pending")
-        .toArray();
-
-      pendingMessages.forEach((message) => {
-        const conn = connectionsRef.current[message.senderId];
-        if (conn) {
-          conn.send({
-            type: "text",
-            content: message.content,
-          });
-          db.messages.update(message.id!, { status: "sent" });
-        }
-      });
-    } catch (error) {
-      console.error("Error sending pending messages:", error);
-    }
-  };
-
-  const addReaction = (messageId: number, reaction: string) => {
-    setMessages((prev) =>
-      prev.map((msg) =>
-        msg.id === messageId
-          ? {
-              ...msg,
-              reactions: {
-                ...msg.reactions,
-                [reaction]: (msg.reactions?.[reaction] || 0) + 1,
-              },
-            }
-          : msg
-      )
-    );
-
-    // Update in database
-    db.messages.update(messageId, {
-      reactions: {
-        ...(prev.find((msg) => msg.id === messageId)?.reactions || {}),
-        [reaction]: (prev.find((msg) => msg.id === messageId)?.reactions?.[reaction] || 0) + 1,
+  const sendFile = async (file: File) => {
+    if (!profile || !state.selectedConversationId) return;
+    const fileId = crypto.randomUUID();
+    const peerId = state.selectedConversationId;
+    const fileInfo: FileInfo = {
+      id: fileId,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+    };
+    dispatch({
+      type: "START_FILE_TRANSFER",
+      payload: {
+        ...fileInfo,
+        status: "transferring",
+        progress: 0,
+        direction: "outgoing",
       },
     });
+
+    const message: Message = {
+      conversationId: peerId,
+      senderId: profile.id,
+      senderName: profile.name,
+      content: `Sending file: ${file.name}`,
+      timestamp: Date.now(),
+      type: "file-transfer",
+      status: "pending",
+      fileInfo: fileInfo,
+    };
+    const newId = await db.messages.add(message);
+    dispatch({ type: "ADD_MESSAGE", payload: { ...message, id: newId } });
+
+    const metaSent = peerHook.sendMessageToPeer(peerId, {
+      type: "file-meta",
+      payload: fileInfo,
+    });
+    if (!metaSent) {
+      toast({
+        title: "File Transfer Failed",
+        description: "Could not connect to peer.",
+        variant: "destructive",
+      });
+      dispatch({
+        type: "FINISH_FILE_TRANSFER",
+        payload: { id: fileId, status: "failed" },
+      });
+      return;
+    }
+    let offset = 0;
+    const reader = new FileReader();
+
+    const readNextChunk = () => {
+      if (offset >= file.size) {
+        peerHook.sendMessageToPeer(peerId, {
+          type: "file-end",
+          payload: { id: fileId },
+        });
+        dispatch({
+          type: "FINISH_FILE_TRANSFER",
+          payload: { id: fileId, status: "completed" },
+        });
+        return;
+      }
+      const slice = file.slice(offset, offset + CHUNK_SIZE);
+      reader.readAsArrayBuffer(slice);
+    };
+
+    reader.onload = (e) => {
+      if (!e.target?.result) return;
+      const chunk = e.target.result as ArrayBuffer;
+      const chunkSent = peerHook.sendMessageToPeer(peerId, {
+        type: "file-chunk",
+        payload: { id: fileId, chunk },
+      });
+      if (!chunkSent) {
+        dispatch({
+          type: "FINISH_FILE_TRANSFER",
+          payload: { id: fileId, status: "failed" },
+        });
+        toast({
+          title: "Transfer Failed",
+          description: "Connection lost during transfer.",
+          variant: "destructive",
+        });
+        return;
+      }
+      offset += chunk.byteLength;
+      const progress = (offset / file.size) * 100;
+      dispatch({
+        type: "UPDATE_FILE_PROGRESS",
+        payload: { id: fileId, progress },
+      });
+      readNextChunk();
+    };
+
+    reader.onerror = () => {
+      dispatch({
+        type: "FINISH_FILE_TRANSFER",
+        payload: { id: fileId, status: "failed" },
+      });
+      toast({
+        title: "File Read Error",
+        description: `Could not read file ${file.name}.`,
+        variant: "destructive",
+      });
+    };
+
+    readNextChunk();
   };
 
-  return (
-    <div className="min-h-screen bg-gray-900 text-white p-4 flex flex-col md:flex-row">
-      <div className="w-full md:w-1/4 p-4 bg-gray-800 rounded-md mb-4 md:mb-0">
-        <h2 className="text-xl font-bold mb-4">Conversations</h2>
-        <ScrollArea className="h-full bg-gray-700 rounded-md p-2">
-          {/* Groups Section */}
-          <div className="mb-4">
-            <h3 className="font-medium mb-2">Groups</h3>
-            {groups.map((group) => (
-              <div
-                key={group.id}
-                className={`flex items-center space-x-2 mb-2 p-2 rounded-md cursor-pointer ${
-                  selectedConversation === group.id ? "bg-blue-600" : "bg-gray-600"
-                }`}
-                onClick={() => selectConversation(group.id, true)}
-              >
-                <Users className="w-4 h-4" />
-                <span>{group.name}</span>
-              </div>
-            ))}
-          </div>
+  const sendFolderAsIndividualFiles = async (folderHandle: any) => {
+    if (!state.selectedConversationId) return;
+    for await (const entry of folderHandle.values()) {
+      if (entry.kind === "file") {
+        const file = await entry.getFile();
+        await sendFile(file);
+      }
+    }
+  };
 
-          {/* Individual Peers Section */}
-          <h3 className="font-medium mb-2">Peers</h3>
-          {remotePeers.map((peer) => (
+  const zipAndSendFolder = async (folderHandle: any) => {
+    const { dismiss, update } = toast({
+      description: (
+        <div className="flex items-center">
+          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          Zipping folder...
+        </div>
+      ),
+      duration: 999999,
+    });
+
+    const zip = new JSZip();
+    const addFolderToZip = async (handle: any, zipFolder: JSZip) => {
+      for await (const entry of handle.values()) {
+        if (entry.kind === "file") {
+          const file = await entry.getFile();
+          zipFolder.file(entry.name, file);
+        } else if (entry.kind === "directory") {
+          const subFolder = zipFolder.folder(entry.name);
+          if (subFolder) {
+            await addFolderToZip(entry, subFolder);
+          }
+        }
+      }
+    };
+
+    try {
+      await addFolderToZip(folderHandle, zip.folder(folderHandle.name)!);
+      const blob = await zip.generateAsync({
+        type: "blob",
+        compression: "DEFLATE",
+      });
+      const zipFile = new File([blob], `${folderHandle.name}.zip`, {
+        type: "application/zip",
+      });
+      update({
+        id: "zipping-complete",
+        title: "Zipping Complete",
+        description: "Zipping complete. Starting transfer...",
+        duration: 3000,
+      });
+      await sendFile(zipFile);
+      dismiss();
+    } catch (error) {
+      console.error("Error zipping folder:", error);
+      dismiss();
+      toast({
+        title: "Zipping Failed",
+        description: "An error occurred while creating the zip file.",
+        variant: "destructive",
+        duration: 5000,
+      });
+    }
+  };
+
+  const downloadFile = async (fileInfo: FileInfo) => {
+    const storedFile = await db.files.get(fileInfo.id);
+    if (storedFile) {
+      const url = URL.createObjectURL(storedFile.blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileInfo.name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } else {
+      toast({
+        title: "Download Error",
+        description: "File not found in local storage.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  return {
+    state,
+    connectToPeer,
+    addAndConnectToPeer,
+    selectConversation,
+    sendMessage,
+    sendFile,
+    sendFolderAsIndividualFiles,
+    zipAndSendFolder,
+    downloadFile,
+  };
+}
+
+// --- Components ---
+
+function WelcomeModal({
+  onProfileCreate,
+}: {
+  onProfileCreate: (name: string) => Promise<any>;
+}) {
+  const [name, setName] = useState<string>("");
+  const [isCreating, setIsCreating] = useState<boolean>(false);
+  const handleCreate = async () => {
+    if (!name.trim()) return;
+    setIsCreating(true);
+    await onProfileCreate(name);
+    // isCreating will stay true as the component unmounts
+  };
+  return (
+    <Dialog open={true}>
+      <DialogContent className="sm:max-w-[425px] bg-gradient-to-br from-slate-900 to-slate-800 text-white border-slate-700 shadow-2xl">
+        <DialogHeader>
+          <DialogTitle className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
+            Welcome to P2P Chat
+          </DialogTitle>
+          <DialogDescription className="text-slate-300">
+            Create your profile to start connecting with peers securely.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="py-4">
+          <Label htmlFor="name" className="text-slate-200 font-medium">
+            Display Name
+          </Label>
+          <Input
+            id="name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            className="bg-slate-800 border-slate-600 text-white focus:border-blue-400 focus:ring-blue-400/20 mt-2"
+            placeholder="Enter your name"
+            onKeyDown={(e) => e.key === "Enter" && handleCreate()}
+          />
+        </div>
+        <DialogFooter>
+          <Button
+            onClick={handleCreate}
+            disabled={isCreating || !name.trim()}
+            className="bg-gradient-to-r from-blue-500 to-purple-500 hover:from-blue-600 hover:to-purple-600 text-white font-medium w-full"
+          >
+            {isCreating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            Get Started
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ZipConfirmationDialog({
+  folderName,
+  onConfirmZip,
+  onConfirmIndividual,
+  onCancel,
+}: {
+  folderName: string;
+  onConfirmZip: () => void;
+  onConfirmIndividual: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <Dialog open={true} onOpenChange={(isOpen) => !isOpen && onCancel()}>
+      <DialogContent className="sm:max-w-[425px] bg-slate-800 text-white border-slate-700">
+        <DialogHeader>
+          <DialogTitle>Send Folder '{folderName}'</DialogTitle>
+          <DialogDescription>
+            Do you want to send this folder as a single compressed .zip file, or
+            send all files individually?
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter className="flex-col sm:flex-row sm:justify-end gap-2">
+          <Button
+            variant="outline"
+            onClick={onCancel}
+            className="w-full sm:w-auto"
+          >
+            Cancel
+          </Button>
+          <Button onClick={onConfirmIndividual} className="w-full sm:w-auto">
+            Send Individually
+          </Button>
+          <Button
+            onClick={onConfirmZip}
+            className="bg-blue-600 hover:bg-blue-700 w-full sm:w-auto"
+          >
+            <Archive className="mr-2 h-4 w-4" /> Yes, Zip and Send
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+  
+
+// --- Sidebar Component (now responsive) ---
+function Sidebar({
+  profile,
+  peers,
+  selectedConversationId,
+  onSelectConversation,
+  onAddPeer,
+  onConnectToPeer,
+}: {
+  profile: UserProfile;
+  peers: PeerData[];
+  selectedConversationId: string | null;
+  onSelectConversation: (peerId: string) => void;
+  onAddPeer: (peerId: string) => void;
+  onConnectToPeer: (peerId: string) => void;
+}) {
+  const [newPeerId, setNewPeerId] = useState("");
+  const { toast } = useToast();
+
+  const copyIdToClipboard = () => {
+    navigator.clipboard.writeText(profile.id);
+    toast({
+      title: "Copied!",
+      description: "Your Peer ID has been copied to the clipboard.",
+    });
+  };
+
+  const handleAddClick = () => {
+    if (newPeerId.trim()) {
+      onAddPeer(newPeerId.trim());
+      setNewPeerId("");
+    }
+  };
+
+  const connectToAllOffline = () => {
+    const offlinePeers = peers.filter((p) => p.status === "offline");
+    if (offlinePeers.length === 0) {
+      toast({
+        title: "No Offline Peers",
+        description: "All known peers are already online or connecting.",
+      });
+      return;
+    }
+    toast({
+      title: "Connecting...",
+      description: `Attempting to connect to ${offlinePeers.length} offline peers.`,
+    });
+    offlinePeers.forEach((p) => onConnectToPeer(p.id));
+  };
+
+  const getStatusIndicator = (status: PeerData["status"]) => {
+    switch (status) {
+      case "online":
+        return (
+          <span
+            className="absolute bottom-0 right-0 block h-3 w-3 rounded-full bg-green-500 border-2 border-slate-900"
+            title="Online"
+          ></span>
+        );
+      case "offline":
+        return (
+          <span
+            className="absolute bottom-0 right-0 block h-3 w-3 rounded-full bg-gray-500 border-2 border-slate-900"
+            title="Offline"
+          ></span>
+        );
+      case "connecting":
+        return (
+          <Loader2
+            className="absolute bottom-0 right-0 h-3.5 w-3.5 animate-spin text-yellow-400 bg-slate-900 rounded-full"
+
+          />
+        );
+    }
+  };
+
+  // UPDATED: Removed fixed width classes, now takes full width of parent
+  return (
+    <aside className="w-full h-full bg-slate-900 flex flex-col p-4 border-r border-slate-700/50">
+      <div className="mb-4 flex-shrink-0">
+        <h2 className="text-xl font-bold text-white">{profile.name}</h2>
+        <div className="text-sm text-gray-400 flex items-center gap-2">
+          <span>ID: {profile.id}</span>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 text-gray-400 hover:text-white"
+            onClick={copyIdToClipboard}
+          >
+            <Copy className="h-4 w-4" />
+          </Button>
+        </div>
+      </div>
+      <div className="mb-4 flex-shrink-0">
+        <Label
+          htmlFor="peer-id-input"
+          className="text-lg font-semibold mb-2 block"
+        >
+          Connect to Peer
+        </Label>
+        <div className="flex gap-2">
+          <Input
+            id="peer-id-input"
+            placeholder="Enter Peer ID"
+            value={newPeerId}
+            onChange={(e) => setNewPeerId(e.target.value)}
+            className="bg-slate-800 border-slate-600 focus:border-blue-400"
+            onKeyDown={(e) => e.key === "Enter" && handleAddClick()}
+          />
+          <Button
+            onClick={handleAddClick}
+            disabled={!newPeerId.trim()}
+            className="bg-blue-600 hover:bg-blue-700"
+          >
+            <UserPlus className="h-4 w-4" />
+          </Button>
+        </div>
+      </div>
+      <div className="flex items-center justify-between mb-2 flex-shrink-0">
+        <h3 className="text-lg font-semibold">Peers</h3>
+        <Button
+          variant="outline"
+          size="sm"
+          className="border-slate-600 hover:bg-slate-700/50"
+          onClick={connectToAllOffline}
+          title="Connect to all offline peers"
+        >
+          <Zap className="h-4 w-4 mr-2" /> Connect All
+        </Button>
+      </div>
+      <ScrollArea className="flex-1 -mx-2">
+        <div className="px-2">
+          {peers.length === 0 && (
+            <p className="text-gray-400 text-sm p-2 text-center">
+              Add a peer to get started.
+            </p>
+          )}
+          {peers.map((peer) => (
             <div
               key={peer.id}
-              className={`flex items-center space-x-2 mb-2 p-2 rounded-md cursor-pointer ${
-                selectedConversation === peer.id ? "bg-blue-600" : "bg-gray-600"
+              className={`flex items-center justify-between p-3 rounded-lg cursor-pointer transition-colors mb-2 ${
+                selectedConversationId === peer.id
+                  ? "bg-blue-600/80"
+                  : "hover:bg-slate-700/50"
               }`}
-              onClick={() => selectConversation(peer.id)}
+              onClick={() => onSelectConversation(peer.id)}
             >
-              <Avatar className="h-8 w-8">
-                <AvatarFallback>{peer.name.charAt(0)}</AvatarFallback>
-              </Avatar>
-              <div>
-                <p className="font-medium">{peer.name}</p>
-                <p className="text-xs text-gray-400">
-                  Last seen: {new Date(peer.lastSeen).toLocaleTimeString()}
-                </p>
-                {peer.unreadMessages > 0 && (
-                  <span className="bg-red-500 text-white text-xs rounded-full px-2 py-1 ml-2">
-                    {peer.unreadMessages}
-                  </span>
+              <div className="flex items-center overflow-hidden">
+                <div className="relative flex-shrink-0">
+                  <Avatar>
+                    <AvatarFallback>
+                      {peer.name.charAt(0).toUpperCase()}
+                    </AvatarFallback>
+                  </Avatar>
+                  {getStatusIndicator(peer.status)}
+                </div>
+                <div className="ml-3 truncate">
+                  <p className="font-medium truncate">{peer.name}</p>
+                  <p className="text-xs text-slate-300 truncate">
+                    {peer.status === "offline" && peer.lastSeen
+                      ? `Last seen: ${new Date(
+                          peer.lastSeen
+                        ).toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}`
+                      : titleCase(peer.status)}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center flex-shrink-0 ml-2">
+                {peer.unreadCount > 0 && (
+                  <div className="bg-red-500 text-white text-xs font-bold rounded-full h-5 w-5 flex items-center justify-center mr-2">
+                    {peer.unreadCount}
+                  </div>
+                )}
+                {peer.status === "offline" && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-gray-400 hover:text-white"
+                    title={`Reconnect to ${peer.name}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onConnectToPeer(peer.id);
+                    }}
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                  </Button>
+                )}
+                {peer.status === "connecting" && (
+                  <Loader2 className="h-4 w-4 animate-spin text-yellow-400" />
                 )}
               </div>
             </div>
           ))}
-        </ScrollArea>
+        </div>
+      </ScrollArea>
+    </aside>
+  );
+}
+
+// --- MessageBubble Component ---
+function MessageBubble({
+  message,
+  isMe,
+  transfer,
+  onDownloadFile,
+}: {
+  message: Message;
+  isMe: boolean;
+  transfer?: FileTransfer;
+  onDownloadFile: (fileInfo: FileInfo) => void;
+}) {
+  const renderStatusIcon = () => {
+    if (!isMe) return null;
+    switch (message.status) {
+      case "pending":
+        return <Hourglass className="h-3 w-3 text-gray-400" />;
+      case "sent":
+        return <CheckCircle className="h-3 w-3 text-gray-400" />;
+      case "delivered":
+        return <CheckCircle className="h-3 w-3 text-blue-400" />;
+      case "failed":
+        return <XCircle className="h-3 w-3 text-red-400" />;
+      default:
+        return null;
+    }
+  };
+
+  const isTransferInProgress =
+    transfer &&
+    (transfer.status === "transferring" || transfer.status === "receiving");
+  const isTransferCompleted = transfer?.status === "completed";
+  const isTransferFailed = transfer?.status === "failed";
+
+  return (
+    <div className={`flex flex-col ${isMe ? "items-end" : "items-start"}`}>
+      {/* UPDATED: Responsive max-width */}
+      <div
+        className={`max-w-[85%] sm:max-w-md lg:max-w-xl p-3 rounded-lg ${
+          isMe ? "bg-blue-600" : "bg-slate-700"
+        }`}
+      >
+        {!isMe && (
+          <p className="text-sm font-semibold text-indigo-300 mb-1">
+            {message.senderName}
+          </p>
+        )}
+        {message.type === "text" && (
+          <p className="whitespace-pre-wrap break-words">{message.content}</p>
+        )}
+        {message.type === "file-transfer" && message.fileInfo && (
+          <div className="flex items-center gap-3">
+            {getFileIcon(message.fileInfo.type)}
+            <div>
+              <p className="font-medium">{message.fileInfo.name}</p>
+              <p className="text-sm text-gray-300">
+                {formatBytes(message.fileInfo.size)}
+              </p>
+            </div>
+            {isTransferInProgress && (
+              <div className="w-28 text-center">
+                <Progress value={transfer.progress} className="h-2" />
+                <p className="text-xs mt-1">
+                  {titleCase(transfer.status)}...{" "}
+                  {Math.round(transfer.progress)}%
+                </p>
+              </div>
+            )}
+            {isTransferCompleted && !isMe && (
+              <Button
+                size="sm"
+                onClick={() => onDownloadFile(message.fileInfo!)}
+                className="bg-green-600 hover:bg-green-700"
+              >
+                <Download className="mr-2 h-4 w-4" /> Download
+              </Button>
+            )}
+            {isTransferCompleted && isMe && (
+              <CheckCircle className="h-5 w-5 text-green-400" />
+            )}
+            {isTransferFailed && (
+              <p className="text-xs text-red-400 flex items-center gap-1">
+                <XCircle className="h-4 w-4" />
+                Failed
+              </p>
+            )}
+          </div>
+        )}
       </div>
-      <div className="w-full md:w-3/4 p-4">
-        <Card className="max-w-full mx-auto bg-gray-800">
-          <CardHeader>
-            <CardTitle className="text-2xl font-bold text-center">
-              P2P File Transfer & Chat
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <Tabs defaultValue="chat" className="w-full">
-              <TabsList className="grid w-full grid-cols-2 mb-4">
-                <TabsTrigger value="chat">Chat</TabsTrigger>
-                <TabsTrigger value="connections">Connections</TabsTrigger>
-              </TabsList>
-              <TabsContent value="chat" className="space-y-4">
-                <div className="h-[60vh] flex flex-col">
-                  <ScrollArea
-                    className="flex-grow mb-4 bg-gray-700 rounded-md p-2"
-                    ref={chatScrollRef}
-                  >
-                    {messages.map((msg) => (
-                      <div
-                        key={msg.timestamp}
-                        className={`mb-2 ${
-                          msg.senderId === peerId ? "text-right" : "text-left"
-                        }`}
-                      >
-                        <div
-                          className={`inline-block p-2 rounded-md ${
-                            msg.senderId === peerId
-                              ? "bg-blue-600"
-                              : "bg-gray-600"
-                          }`}
-                        >
-                          <p className="text-sm text-gray-300">
-                            {msg.senderName}
-                          </p>
-                          <p className="text-xs text-gray-400">
-                            {new Date(msg.timestamp).toLocaleTimeString()}
-                          </p>
-                          <div className="flex space-x-2 mt-2">
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() =>
-                                addReaction(msg.id!, "thumbs-up")
-                              }
-                            >
-                              <ThumbsUp className="w-4 h-4" />
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() =>
-                                addReaction(msg.id!, "thumbs-down")
-                              }
-                            >
-                              <ThumbsDown className="w-4 h-4" />
-                            </Button>
-                          </div>
-                          {msg.type === "file" ? (
-                            <div className="flex items-center">
-                              <span>{msg.content}</span>
-                              <Button
-                                size="sm"
-                                className="ml-2"
-                                onClick={() => downloadFile(msg.fileInfo!)}
-                              >
-                                <Download className="w-4 h-4" />
-                              </Button>
-                            </div>
-                          ) : (
-                            <p>{msg.content}</p>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </ScrollArea>
-                  <div className="flex space-x-2">
-                    <Input
-                      type="file"
-                      onChange={(e) => setFiles(e.target.files)}
-                      className="bg-gray-700 text-white flex-grow"
-                      multiple
-                    />
-                    <Button
-                      onClick={() =>
-                        document.getElementById("folderInput")?.click()
-                      }
-                      disabled={connectionStatus !== "connected"}
-                    >
-                      <Folder className="w-4 h-4 mr-2" />
-                      Select Folder
-                    </Button>
-                    <input
-                      id="folderInput"
-                      type="file"
-                      onChange={(e) => setFiles(e.target.files)}
-                      className="hidden"
-                      directory=""
-                      webkitdirectory=""
-                      multiple
-                    />
-                    <Button
-                      onClick={() => handleFileUpload(files!)}
-                      disabled={connectionStatus !== "connected" || !files}
-                    >
-                      <Upload className="w-4 h-4 mr-2" />
-                      Send Files
-                    </Button>
-                  </div>
-                  {Object.entries(fileTransfers).map(([id, transfer]) => (
-                    <div key={id} className="space-y-1">
-                      <div className="flex justify-between text-sm">
-                        <span className="truncate">{transfer.name}</span>
-                        <span>{Math.round(transfer.progress)}%</span>
-                      </div>
-                      <Progress value={transfer.progress} className="w-full" />
-                      {transfer.progress === 100 && !autoDownload && (
-                        <Button
-                          onClick={() => downloadFile(transfer)}
-                          size="sm"
-                          className="mt-1"
-                        >
-                          <Download className="w-4 h-4 mr-2" />
-                          Download
-                        </Button>
-                      )}
-                    </div>
-                  ))}
-                  <div className="flex space-x-2 mt-2">
-                    <Input
-                      type="text"
-                      value={currentMessage}
-                      onChange={(e) => setCurrentMessage(e.target.value)}
-                      placeholder="Type a message..."
-                      className="bg-gray-700 text-white flex-grow"
-                      onKeyPress={(e) => {
-                        if (e.key === "Enter") {
-                          sendMessage();
-                        }
-                      }}
-                    />
-                    <Button
-                      onClick={sendMessage}
-                      disabled={
-                        !selectedConversation ||
-                        connectionStatus !== "connected" ||
-                        (conversationType === "individual" &&
-                          peerConnectionCount > 1)
-                      }
-                    >
-                      <Send className="w-4 h-4 mr-2" />
-                      Send
-                    </Button>
-                  </div>
-                </div>
-              </TabsContent>
-              <TabsContent value="connections" className="space-y-4">
-                <div>
-                  <p className="mb-2">
-                    Your ID:{" "}
-                    {peerId || <Loader2 className="inline animate-spin" />}
-                  </p>
-                  <div className="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-2">
-                    <Input
-                      type="text"
-                      placeholder="Peer ID to connect"
-                      value={newPeerId}
-                      onChange={(e) => setNewPeerId(e.target.value)}
-                      className="bg-gray-700 text-white"
-                      maxLength={4}
-                    />
-                    <Button
-                      onClick={() => connectToPeer()}
-                      disabled={newPeerId.length !== 4}
-                    >
-                      <UserPlus className="w-4 h-4 mr-2" />
-                      Connect
-                    </Button>
-                  </div>
-                  <div>
-                    <p className="mb-2">Status: {connectionStatus}</p>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <Dialog>
-                      <DialogTrigger asChild>
-                        <Button disabled={isInGroup}>
-                          <Users className="w-4 h-4 mr-2" />
-                          {isInGroup ? "In Group" : "Create/Join Group"}
-                        </Button>
-                      </DialogTrigger>
-                      <DialogContent>
-                        <DialogHeader>
-                          <DialogTitle>
-                            {isInGroup ? "Group Info" : "Create or Join Group"}
-                          </DialogTitle>
-                          <DialogDescription>
-                            {isInGroup
-                              ? `You're in group ${activeGroup}. Share this ID with others to let them join.`
-                              : "Create a new group or join an existing one by entering the group ID."}
-                          </DialogDescription>
-                        </DialogHeader>
-                        {isInGroup ? (
-                          <div className="flex items-center space-x-2">
-                            <Input
-                              value={activeGroup!}
-                              readOnly
-                              className="bg-gray-700 text-white"
-                            />
-                            <Button
-                              onClick={() => {
-                                navigator.clipboard.writeText(activeGroup!);
-                                toast({
-                                  title: "Copied",
-                                  description: "Group ID copied to clipboard",
-                                });
-                              }}
-                            >
-                              <Copy className="w-4 h-4" />
-                            </Button>
-                          </div>
-                        ) : (
-                          <div className="space-y-4">
-                            <Button onClick={createGroup} className="w-full">
-                              Create New Group
-                            </Button>
-                            <div className="flex space-x-2">
-                              <Input
-                                placeholder="Enter Group ID"
-                                value={newPeerId}
-                                onChange={(e) => setNewPeerId(e.target.value)}
-                                className="bg-gray-700 text-white"
-                              />
-                              <Button onClick={() => joinGroup(newPeerId)}>
-                                Join
-                              </Button>
-                            </div>
-                          </div>
-                        )}
-                        <DialogFooter>
-                          {isInGroup && (
-                            <Button variant="destructive" onClick={leaveGroup}>
-                              Leave Group
-                            </Button>
-                          )}
-                        </DialogFooter>
-                      </DialogContent>
-                    </Dialog>
-                  </div>
-                  <div>
-                    <p className="mb-2">Connected Peers:</p>
-                    <ScrollArea className="h-40 bg-gray-700 rounded-md p-2">
-                      {remotePeers.map((peer) => (
-                        <div
-                          key={peer.id}
-                          className={`flex items-center space-x-2 mb-2 p-2 rounded-md cursor-pointer ${
-                            selectedConversation === peer.id
-                              ? "bg-blue-600"
-                              : "bg-gray-600"
-                          }`}
-                          onClick={() => selectConversation(peer.id)}
-                        >
-                          <Avatar className="h-8 w-8">
-                            <AvatarFallback>{peer.name.charAt(0)}</AvatarFallback>
-                          </Avatar>
-                          <span>{peer.name}</span>
-                        </div>
-                      ))}
-                    </ScrollArea>
-                  </div>
-                </div>
-              </TabsContent>
-            </Tabs>
-          </CardContent>
-        </Card>
+      <div className="text-xs text-gray-400 mt-1 px-1 flex items-center gap-1">
+        <span>
+          {new Date(message.timestamp).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          })}
+        </span>
+        {renderStatusIcon()}
       </div>
     </div>
+  );
+}
+
+// --- ChatWindow Component (now responsive) ---
+function ChatWindow({
+  profile,
+  selectedConversationId,
+  messages,
+  fileTransfers,
+  peers,
+  onSendMessage,
+  onSendFile,
+  onSendFolderAsIndividualFiles,
+  onZipAndSendFolder,
+  onDownloadFile,
+  onBack, // ADDED: For mobile navigation
+}: {
+  profile: UserProfile;
+  selectedConversationId: string | null;
+  messages: Message[];
+  fileTransfers: Record<string, FileTransfer>;
+  peers: Record<string, PeerData>;
+  onSendMessage: (content: string) => void;
+  onSendFile: (file: File) => void;
+  onSendFolderAsIndividualFiles: (folderHandle: any) => void;
+  onZipAndSendFolder: (folderHandle: any) => void;
+  onDownloadFile: (fileInfo: FileInfo) => void;
+  onBack?: () => void; // ADDED: Optional prop
+}) {
+  const [currentMessage, setCurrentMessage] = useState<string>("");
+  const [folderToSend, setFolderToSend] = useState<{
+    handle: any;
+    name: string;
+  } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  const handleSend = () => {
+    if (currentMessage.trim()) {
+      onSendMessage(currentMessage);
+      setCurrentMessage("");
+    }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files?.[0]) {
+      onSendFile(e.target.files[0]);
+    }
+    e.target.value = "";
+  };
+
+  const handleFolderPick = async () => {
+    // Note: showDirectoryPicker is not available in all browsers (e.g., Firefox)
+    if ("showDirectoryPicker" in window) {
+      try {
+        const folderHandle = await (window as any).showDirectoryPicker();
+        setFolderToSend({ handle: folderHandle, name: folderHandle.name });
+      } catch (err) {
+        console.info("Folder picker was cancelled by the user.");
+      }
+    } else {
+      alert("Your browser does not support folder selection.");
+    }
+  };
+
+  if (!selectedConversationId) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center bg-slate-800 text-center p-4">
+        <Zap size={64} className="mb-4 text-slate-500" />
+        <h2 className="text-2xl font-bold text-slate-300">
+          Welcome to P2P Chat
+        </h2>
+        <p className="text-gray-400 max-w-sm">
+          Select a peer from the list to start a conversation, or add a new peer
+          using their ID.
+        </p>
+      </div>
+    );
+  }
+
+  const selectedPeer = peers[selectedConversationId];
+  const getStatusInfo = (status?: PeerData["status"]) => {
+    switch (status) {
+      case "online":
+        return { color: "bg-green-500", text: "Online" };
+      case "offline":
+        return { color: "bg-gray-500", text: "Offline" };
+      case "connecting":
+        return { color: "bg-yellow-500", text: "Connecting..." };
+      default:
+        return { color: "bg-gray-500", text: "Unknown" };
+    }
+  };
+  const statusInfo = getStatusInfo(selectedPeer?.status);
+
+  return (
+    <>
+      {folderToSend && (
+        <ZipConfirmationDialog
+          folderName={folderToSend.name}
+          onCancel={() => setFolderToSend(null)}
+          onConfirmIndividual={() => {
+            onSendFolderAsIndividualFiles(folderToSend.handle);
+            setFolderToSend(null);
+          }}
+          onConfirmZip={() => {
+            onZipAndSendFolder(folderToSend.handle);
+            setFolderToSend(null);
+          }}
+        />
+      )}
+      <div className="flex-1 flex flex-col bg-slate-800 min-h-0 h-full">
+        {/* UPDATED: Header is now responsive */}
+        <header className="flex-shrink-0 px-4 py-3 bg-slate-900/70 border-b border-slate-700/50 flex items-center justify-between">
+          <div className="flex items-center overflow-hidden">
+            {/* ADDED: Back button for mobile */}
+            {onBack && (
+              <Button
+                onClick={onBack}
+                variant="ghost"
+                size="icon"
+                className="md:hidden mr-2"
+              >
+                <ArrowLeft className="h-5 w-5" />
+              </Button>
+            )}
+            <h2 className="text-xl font-semibold text-white truncate">
+              {selectedPeer?.name ?? "Select a Chat"}
+            </h2>
+          </div>
+          {selectedPeer && (
+            <div className="flex items-center gap-2 text-sm flex-shrink-0">
+              <span
+                className={`h-2.5 w-2.5 rounded-full ${statusInfo.color}`}
+              ></span>
+              <span className="text-slate-300">{statusInfo.text}</span>
+            </div>
+          )}
+        </header>
+
+        <ScrollArea className="flex-1 p-4">
+          <div className="space-y-4">
+            {messages.map((msg, index) => (
+              <div
+                key={msg.id ?? msg.tempId ?? index}
+                className={`flex ${
+                  msg.senderId === profile.id ? "justify-end" : "justify-start"
+                }`}
+              >
+                <MessageBubble
+                  message={msg}
+                  isMe={msg.senderId === profile.id}
+                  transfer={
+                    msg.fileInfo ? fileTransfers[msg.fileInfo.id] : undefined
+                  }
+                  onDownloadFile={onDownloadFile}
+                />
+              </div>
+            ))}
+            <div ref={messagesEndRef} />
+          </div>
+        </ScrollArea>
+        {selectedPeer?.status === "online" ? (
+          <footer className="flex-shrink-0 p-4 bg-slate-900/70 border-t border-slate-700/50">
+            <div className="flex items-center gap-2 bg-slate-700 rounded-xl p-2">
+              <Input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileChange}
+                className="hidden"
+              />
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => fileInputRef.current?.click()}
+                title="Attach file"
+              >
+                <Paperclip className="w-5 h-5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={handleFolderPick}
+                title="Attach folder"
+              >
+                <Archive className="w-5 h-5" />
+              </Button>
+              <Input
+                placeholder={`Message ${selectedPeer?.name}...`}
+                className="flex-1 bg-transparent border-none focus-visible:ring-0 focus-visible:ring-offset-0 text-white placeholder-gray-400"
+                value={currentMessage}
+                onChange={(e) => setCurrentMessage(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
+              />
+              <Button
+                onClick={handleSend}
+                disabled={!currentMessage.trim()}
+                className="bg-blue-600 hover:bg-blue-700 rounded-lg"
+              >
+                <Send className="w-5 h-5 text-white" />
+              </Button>
+            </div>
+          </footer>
+        ) : (
+          <footer className="flex-shrink-0 p-4 bg-slate-900/70 border-t border-slate-700/50 text-center">
+            <p className="text-slate-400 text-sm">
+              Peer is offline. You cannot send messages.
+            </p>
+          </footer>
+        )}
+      </div>
+    </>
+  );
+}
+
+// --- AppLayout (now responsive) ---
+function AppLayout({ profile }: { profile: UserProfile }) {
+  const {
+    state,
+    connectToPeer,
+    addAndConnectToPeer,
+    selectConversation,
+    sendMessage,
+    sendFile,
+    sendFolderAsIndividualFiles,
+    zipAndSendFolder,
+    downloadFile,
+  } = useChatManager(profile);
+
+  const peersArray = Object.values(state.peers)
+    .filter((p) => p.id !== profile.id)
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const currentMessages =
+    state.messages[state.selectedConversationId ?? ""] ?? [];
+
+  return (
+    // UPDATED: This layout now handles mobile and desktop views
+    <div className="flex h-screen bg-slate-900 text-white font-sans overflow-hidden">
+      {/* Sidebar Container: On mobile, hidden if a chat is selected. Always shown on desktop. */}
+      <div
+        className={`
+          ${state.selectedConversationId ? "hidden" : "flex"}
+          md:flex flex-col flex-shrink-0 w-full md:w-1/4 md:min-w-[300px]
+        `}
+      >
+        <Sidebar
+          profile={profile}
+          peers={peersArray}
+          selectedConversationId={state.selectedConversationId}
+          onSelectConversation={selectConversation}
+          onAddPeer={addAndConnectToPeer}
+          onConnectToPeer={connectToPeer}
+        />
+      </div>
+
+      {/* ChatWindow Container: On mobile, only shown if a chat is selected. Always shown on desktop. */}
+      <main
+        className={`
+          ${!state.selectedConversationId ? "hidden" : "flex"}
+          md:flex flex-1 flex-col
+        `}
+      >
+        <ChatWindow
+          profile={profile}
+          selectedConversationId={state.selectedConversationId}
+          messages={currentMessages}
+          fileTransfers={state.fileTransfers}
+          peers={state.peers}
+          onSendMessage={sendMessage}
+          onSendFile={sendFile}
+          onSendFolderAsIndividualFiles={sendFolderAsIndividualFiles}
+          onZipAndSendFolder={zipAndSendFolder}
+          onDownloadFile={downloadFile}
+          onBack={() => selectConversation(null)} // This enables the back button on mobile
+        />
+      </main>
+    </div>
+  );
+}
+
+// --- Main Page Component ---
+export default function Home() {
+  const { profile, isLoading, createUserProfile } = useUserProfile();
+
+  if (isLoading) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-gray-900">
+        <Loader2 className="h-12 w-12 animate-spin text-white" />
+        <Toaster />
+      </div>
+    );
+  }
+
+  if (!profile) {
+    return (
+      <>
+        <WelcomeModal onProfileCreate={createUserProfile} />
+        <Toaster />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <AppLayout profile={profile} />
+      <Toaster />
+    </>
   );
 }
