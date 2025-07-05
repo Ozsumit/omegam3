@@ -1748,6 +1748,7 @@ function ChatWindow({
           onConfirmZip={() => {
             onZipAndSendFolder(folderToSend.handle);
             setFolderToSend(null);
+            alert(`${folderToSend.name} is being processed.\n\nIt may take some time showing up on the ui depending on the size of app.\n\nDo not close this tab`);
           }}
         />
       )}
