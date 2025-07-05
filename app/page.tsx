@@ -1119,7 +1119,7 @@ function ZipConfirmationDialog({
 }) {
   return (
     <Dialog open={true} onOpenChange={(isOpen) => !isOpen && onCancel()}>
-      <DialogContent className="sm:max-w-[60%] bg-slate-800 text-white border-slate-700">
+      <DialogContent className="sm:max-w-[45%] bg-slate-800 text-white border-slate-700">
         <DialogHeader>
           <DialogTitle>Send Folder '{folderName}'</DialogTitle>
           <DialogDescription>
@@ -1136,13 +1136,13 @@ function ZipConfirmationDialog({
             Cancel
           </Button>
           <Button onClick={onConfirmIndividual} className="w-full sm:w-auto">
-            Send Individually
+            Send Individually (Faster)
           </Button>
           <Button
             onClick={onConfirmZip}
             className="bg-blue-600 hover:bg-blue-700 w-full sm:w-auto"
           >
-            <Archive className="mr-2 h-4 w-4" /> Yes, Zip and Send
+            <Archive className="mr-2 h-4 w-4" /> Yes, Zip and Send (Manageable)
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1565,7 +1565,7 @@ function ChatWindow({
             onZipAndSendFolder(folderToSend.handle);
             setFolderToSend(null);
             alert(
-              `\`${folderToSend.name}\` is being processed. It may take some time showing up on the ui depending on the size of app.\n\nDo not close this tab.\n\nYou can close this alert though`
+              `${folderToSend.name} is being processed. It may take some time showing up on the ui depending on the size of app.\n\nDo not close this tab.\n\nYou can close this alert though`
             );
     //         <DialogDescription id="zipping-complete">
     // Your file is being processed. It may take some time showing up on the ui depending on the size of app. Do not close this tab            </DialogDescription>
