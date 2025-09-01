@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback, useReducer } from "react";
 import Peer, { DataConnection } from "peerjs";
 import Dexie from "dexie";
 import JSZip from "jszip";
-
+import Image from "next/image";
 // --- UI Imports ---
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
@@ -35,7 +35,7 @@ import {
   CheckCircle,
   Hourglass,
   FileText,
-  Image,
+  Images,
   Video,
   Music,
   Archive,
@@ -191,7 +191,7 @@ const formatBytes = (bytes: number, decimals: number = 2): string => {
 };
 
 const getFileIcon = (type: string) => {
-  if (type.startsWith("image/")) return <Image className="h-4 w-4" />;
+  if (type.startsWith("image/")) return <Images className="h-4 w-4" />;
   if (type.startsWith("video/")) return <Video className="h-4 w-4" />;
   if (type.startsWith("audio/")) return <Music className="h-4 w-4" />;
   if (type.includes("zip") || type.includes("rar") || type.includes("7z"))
@@ -1149,7 +1149,6 @@ function ZipConfirmationDialog({
     </Dialog>
   );
 }
-  
 
 // --- Sidebar Component (now responsive) ---
 function Sidebar({
@@ -1219,10 +1218,7 @@ function Sidebar({
         );
       case "connecting":
         return (
-          <Loader2
-            className="absolute bottom-0 right-0 h-3.5 w-3.5 animate-spin text-yellow-400 bg-slate-900 rounded-full"
-
-          />
+          <Loader2 className="absolute bottom-0 right-0 h-3.5 w-3.5 animate-spin text-yellow-400 bg-slate-900 rounded-full" />
         );
     }
   };
@@ -1407,7 +1403,9 @@ function MessageBubble({
           <div className="flex min-w-[13rem] flex-col items-center gap-3">
             {getFileIcon(message.fileInfo.type)}
             <div>
-              <p className="font-medium text-ellipsis text-center text-wrap">{message.fileInfo.name}</p>
+              <p className="font-medium text-ellipsis text-center text-wrap">
+                {message.fileInfo.name}
+              </p>
               <p className="text-sm text-center text-gray-300">
                 {formatBytes(message.fileInfo.size)}
               </p>
@@ -1567,8 +1565,8 @@ function ChatWindow({
             alert(
               `${folderToSend.name} is being processed. It may take some time showing up on the ui depending on the size of app.\n\nDo not close this tab.\n\nYou can close this alert though`
             );
-    //         <DialogDescription id="zipping-complete">
-    // Your file is being processed. It may take some time showing up on the ui depending on the size of app. Do not close this tab            </DialogDescription>
+            //         <DialogDescription id="zipping-complete">
+            // Your file is being processed. It may take some time showing up on the ui depending on the size of app. Do not close this tab            </DialogDescription>
           }}
         />
       )}
@@ -1703,46 +1701,60 @@ function AppLayout({ profile }: { profile: UserProfile }) {
     state.messages[state.selectedConversationId ?? ""] ?? [];
 
   return (
-    // UPDATED: This layout now handles mobile and desktop views
-    <div className="flex h-screen w-screen bg-slate-900 text-white font-sans overflow-hidden">
-      {/* Sidebar Container: On mobile, hidden if a chat is selected. Always shown on desktop. */}
-      <div
-        className={`
+    <div className="main flex flex-col">
+      <div className="flex items-center justify-start ml-8 my-4">
+        {/* <Image
+          src="@/app/Group8.png"
+          alt=""
+          width={50}
+          height={50}
+          className="mr-2"
+        /> */}
+        <h1 className="text-3xl font-extrabold text-white tracking-wide">
+          Omega Chat
+        </h1>
+      </div>
+      {/* // UPDATED: This layout now handles mobile and desktop views */}
+      <div className="flex h-screen w-screen bg-slate-900 text-white font-sans overflow-hidden">
+        {/* Sidebar Container: On mobile, hidden if a chat is selected. Always shown on desktop. */}
+        <div
+          className={`
           ${state.selectedConversationId ? "hidden" : "flex"}
           md:flex flex-col flex-shrink-1 w-full md:w-1/4 md:min-w-[300px]
         `}
-      >
-        <Sidebar
-          profile={profile}
-          peers={peersArray}
-          selectedConversationId={state.selectedConversationId}
-          onSelectConversation={selectConversation}
-          onAddPeer={addAndConnectToPeer}
-          onConnectToPeer={connectToPeer}
-        />
-      </div>
+        >
+          <Sidebar
+            profile={profile}
+            peers={peersArray}
+            selectedConversationId={state.selectedConversationId}
+            onSelectConversation={selectConversation}
+            onAddPeer={addAndConnectToPeer}
+            onConnectToPeer={connectToPeer}
+          />
+        </div>
 
-      {/* ChatWindow Container: On mobile, only shown if a chat is selected. Always shown on desktop. */}
-      <main
-        className={`
+        {/* ChatWindow Container: On mobile, only shown if a chat is selected. Always shown on desktop. */}
+        <main
+          className={`
           ${!state.selectedConversationId ? "hidden" : "flex"}
           md:flex flex-1 flex-col
         `}
-      >
-        <ChatWindow
-          profile={profile}
-          selectedConversationId={state.selectedConversationId}
-          messages={currentMessages}
-          fileTransfers={state.fileTransfers}
-          peers={state.peers}
-          onSendMessage={sendMessage}
-          onSendFile={sendFile}
-          onSendFolderAsIndividualFiles={sendFolderAsIndividualFiles}
-          onZipAndSendFolder={zipAndSendFolder}
-          onDownloadFile={downloadFile}
-          onBack={() => selectConversation(null)} // This enables the back button on mobile
-        />
-      </main>
+        >
+          <ChatWindow
+            profile={profile}
+            selectedConversationId={state.selectedConversationId}
+            messages={currentMessages}
+            fileTransfers={state.fileTransfers}
+            peers={state.peers}
+            onSendMessage={sendMessage}
+            onSendFile={sendFile}
+            onSendFolderAsIndividualFiles={sendFolderAsIndividualFiles}
+            onZipAndSendFolder={zipAndSendFolder}
+            onDownloadFile={downloadFile}
+            onBack={() => selectConversation(null)} // This enables the back button on mobile
+          />
+        </main>
+      </div>{" "}
     </div>
   );
 }
@@ -1750,7 +1762,6 @@ function AppLayout({ profile }: { profile: UserProfile }) {
 // --- Main Page Component ---
 export default function Home() {
   const { profile, isLoading, createUserProfile } = useUserProfile();
-
   if (isLoading) {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-gray-900">
