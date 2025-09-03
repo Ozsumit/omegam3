@@ -1702,7 +1702,7 @@ function AppLayout({ profile }: { profile: UserProfile }) {
 
   return (
     <div className="main flex flex-col">
-      <div className="flex items-center justify-start ml-8 my-4">
+      <div className="flex bg-[#1e293b] items-center justify-start ml-8 my-4">
         {/* <Image
           src="@/app/Group8.png"
           alt=""
