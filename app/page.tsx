@@ -1701,8 +1701,8 @@ function AppLayout({ profile }: { profile: UserProfile }) {
     state.messages[state.selectedConversationId ?? ""] ?? [];
 
   return (
-    <div className="main flex flex-col">
-      <div className="flex bg-[#1e293b] items-center justify-start ml-8 my-4">
+    <div className="main flex bg-[rgb(15,23,45)] flex-col border-b border-slate-700">
+      <div className="flex bg-[rgb(15,23,45)] items-center justify-start ml-8 my-4">
         {/* <Image
           src="@/app/Group8.png"
           alt=""
