@@ -22,7 +22,6 @@ export function usePeer({
   const connectionsRef = useRef<Record<string, DataConnection>>({});
   const heartbeatsRef = useRef<Record<string, NodeJS.Timeout>>({});
 
-  // Ref for callbacks to avoid stale closures
   const callbacksRef = useRef({ onDataReceived, onPeerConnected, onPeerDisconnected });
 
   useEffect(() => {
@@ -136,14 +135,14 @@ export function usePeer({
   );
 
   const reconnectToPastPeers = useCallback(async () => {
-    if (!profile) return;
+    if (!profile || !isPeerReady) return;
     const pastPeers = await db.peers.toArray();
     pastPeers.forEach((peerData) => {
-      if (peerData.id !== profile.id) {
+      if (peerData.id !== profile.id && !connectionsRef.current[peerData.id]?.open) {
         connectToPeer(peerData.id);
       }
     });
-  }, [connectToPeer, profile]);
+  }, [connectToPeer, profile, isPeerReady]);
 
   const sendMessageToPeer = useCallback((peerId: string, data: PeerMessagePayload): boolean => {
     const conn = connectionsRef.current[peerId];
