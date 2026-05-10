@@ -6,6 +6,6 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export function generateNumericId(): string {
-  // Use 8 digits for much lower collision risk (1 in 100 million)
-  return Math.floor(10000000 + Math.random() * 90000000).toString();
+  // Back to 4 digits as requested
+  return Math.floor(1000 + Math.random() * 9000).toString();
 }
