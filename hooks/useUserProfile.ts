@@ -1,4 +1,3 @@
-// /hooks/useUserProfile.ts
 import { useState, useEffect } from "react";
 import { db } from "@/lib/db";
 import { UserProfile } from "@/types";
@@ -14,7 +13,6 @@ export function useUserProfile() {
       try {
         let userProfile = await db.profile.get("user");
         if (!userProfile) {
-          // If no profile, we wait for user to create one
           setIsLoading(false);
           return;
         }
@@ -32,9 +30,8 @@ export function useUserProfile() {
     if (!name.trim()) throw new Error("Display name cannot be empty.");
 
     const newProfile: UserProfile = {
-      id: generateNumericId().toString(),
+      id: generateNumericId(),
       name,
-      preferences: { theme: "dark", autoDownload: true },
     };
 
     await db.profile.put(newProfile, "user");
@@ -43,13 +40,4 @@ export function useUserProfile() {
   };
 
   return { profile, isLoading, createUserProfile };
-}
-
-// utils.ts
-
-// (other utility functions)
-
-export function generateNumericId(): number {
-  // Simple numeric ID generator (example: timestamp + random)
-  return Date.now() + Math.floor(Math.random() * 10000);
 }
