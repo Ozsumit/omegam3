@@ -434,10 +434,16 @@ export function useChatManager(profile: UserProfile | null) {
   };
 
   const addReaction = async (messageId: number, reaction: string) => {
-    if (!profile || !state.selectedConversationId) return;
-    const convId = state.selectedConversationId;
+    if (!profile || !stateRef.current.selectedConversationId) return;
+    const convId = stateRef.current.selectedConversationId;
+
+    // Immediate UI Update
     dispatch({ type: "ADD_REACTION", payload: { conversationId: convId, messageId, reaction, userId: profile.id } });
+
+    // Send to peer
     peerHook.sendMessageToPeer(convId, { type: "reaction", payload: { messageId, reaction, userId: profile.id } });
+
+    // Persist
     const msg = await db.messages.get(messageId);
     if (msg) {
       const reactions = { ...(msg.reactions || {}) };

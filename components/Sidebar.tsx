@@ -49,24 +49,24 @@ export function Sidebar({
               onClick={copyId}
               className="mt-2 group flex items-center gap-2 px-3 py-1.5 bg-secondary rounded-full hover:bg-muted transition-all"
             >
-              <span className="text-[10px] font-black uppercase tracking-widest opacity-50">My ID:</span>
-              <span className="text-sm font-bold tracking-tight">{profile.id}</span>
-              {copied ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3 opacity-0 group-hover:opacity-100 transition-opacity" />}
+              <span className="text-[10px] font-black uppercase tracking-widest text-foreground/50">My ID:</span>
+              <span className="text-sm font-bold tracking-tight text-foreground">{profile.id}</span>
+              {copied ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3 text-foreground/40 group-hover:opacity-100 transition-opacity" />}
             </button>
           </div>
           <button className="h-12 w-12 flex items-center justify-center bg-secondary rounded-2xl hover:bg-muted transition-colors shadow-sm">
-            <Settings className="h-5 w-5 opacity-70" />
+            <Settings className="h-5 w-5 text-foreground/70" />
           </button>
         </div>
 
         <div className="space-y-3">
           <div className="relative">
-            <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-foreground/40" />
             <Input
               placeholder="Search..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="bg-secondary border-none pl-12 h-14 text-base font-bold rounded-2xl focus-visible:ring-primary/20"
+              className="bg-secondary border-none pl-12 h-14 text-base font-bold rounded-2xl focus-visible:ring-primary/20 text-foreground"
             />
           </div>
 
@@ -75,13 +75,13 @@ export function Sidebar({
               placeholder="Connect to ID..."
               value={newPeerId}
               onChange={(e) => setNewPeerId(e.target.value)}
-              className="bg-secondary border-none h-14 text-base font-bold rounded-2xl focus-visible:ring-primary/20"
+              className="bg-secondary border-none h-14 text-base font-bold rounded-2xl focus-visible:ring-primary/20 text-foreground"
               maxLength={4}
             />
             <Button
               onClick={() => { if(newPeerId.length === 4) { onAddPeer(newPeerId); setNewPeerId(""); } }}
               disabled={newPeerId.length !== 4}
-              className="h-14 w-14 rounded-2xl shadow-swiss"
+              className="h-14 w-14 rounded-2xl shadow-swiss bg-primary text-white"
             >
               <Plus className="h-6 w-6" />
             </Button>
@@ -90,7 +90,7 @@ export function Sidebar({
       </div>
 
       <div className="px-8 py-2 flex items-center justify-between mb-2">
-        <h3 className="text-[10px] font-black uppercase tracking-[0.2em] opacity-30">Recent Links</h3>
+        <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-foreground/30">Recent Links</h3>
         <button onClick={() => peers.forEach(p => p.status === 'offline' && onConnectToPeer(p.id))} className="text-[10px] font-black uppercase tracking-widest text-primary hover:opacity-70 transition-opacity">
           Re-Link All
         </button>
@@ -115,7 +115,7 @@ export function Sidebar({
                   </AvatarFallback>
                 </Avatar>
                 <span className={`absolute -bottom-1 -right-1 w-5 h-5 rounded-full border-4 border-background ${
-                  peer.status === 'online' ? 'bg-green-500' : 'bg-muted-foreground/30'
+                  peer.status === 'online' ? 'bg-green-500' : 'bg-foreground/20'
                 }`} />
               </div>
               <div className="flex-1 text-left min-w-0">
