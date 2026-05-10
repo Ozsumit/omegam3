@@ -12,6 +12,11 @@ export interface Message {
   status: "pending" | "sent" | "delivered" | "failed";
   fileInfo?: FileInfo;
   reactions?: Record<string, string[]>;
+  replyTo?: {
+    id: number;
+    senderName: string;
+    content: string;
+  };
 }
 
 export interface FileInfo {
@@ -68,7 +73,7 @@ export interface FolderToSend {
 
 export type PeerMessagePayload =
   | { type: "profile-info"; payload: { id: string; name: string } }
-  | { type: "text"; payload: { content: string } }
+  | { type: "text"; payload: { content: string; replyTo?: Message["replyTo"] } }
   | { type: "file-meta"; payload: FileInfo }
   | { type: "file-chunk"; payload: { id: string; chunk: ArrayBuffer; seq?: number } }
   | { type: "file-end"; payload: { id: string } }
@@ -93,6 +98,7 @@ export type ChatAction =
   | { type: "UPDATE_PEER_STATUS"; payload: { peerId: string; status: PeerData["status"] } }
   | { type: "ADD_MESSAGE"; payload: Message }
   | { type: "UPDATE_MESSAGE_STATUS"; payload: { tempId: string; newId: number; status: Message["status"]; conversationId: string } }
+  | { type: "ADD_REACTION"; payload: { conversationId: string; messageId: number; reaction: string; userId: string } }
   | { type: "INCREMENT_UNREAD"; payload: string }
   | { type: "START_FILE_TRANSFER"; payload: FileTransfer }
   | { type: "UPDATE_FILE_PROGRESS"; payload: { id: string; progress: number } }

@@ -106,6 +106,26 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
         messages: { ...state.messages, [conversationId]: updatedMessages },
       };
     }
+    case "ADD_REACTION": {
+      const { conversationId, messageId, reaction, userId } = action.payload;
+      if (!state.messages[conversationId]) return state;
+      const updatedMessages = state.messages[conversationId].map((m) => {
+        if (m.id === messageId) {
+          const reactions = { ...(m.reactions || {}) };
+          const users = [...(reactions[reaction] || [])];
+          if (!users.includes(userId)) {
+            users.push(userId);
+            reactions[reaction] = users;
+          } else {
+            reactions[reaction] = users.filter(id => id !== userId);
+            if (reactions[reaction].length === 0) delete reactions[reaction];
+          }
+          return { ...m, reactions };
+        }
+        return m;
+      });
+      return { ...state, messages: { ...state.messages, [conversationId]: updatedMessages } };
+    }
     case "INCREMENT_UNREAD": {
       if (!state.peers[action.payload] || state.selectedConversationId === action.payload) return state;
       return {
@@ -174,7 +194,6 @@ export function useChatManager(profile: UserProfile | null) {
   const incomingFiles = useRef<Record<string, { metadata: FileInfo; chunks: ArrayBuffer[]; expectedSeq: number }>>({});
   const outgoingFiles = useRef<Record<string, { file: File; offset: number; seq: number }>>({});
 
-  // Destructure peerHook late or use ref
   const sendMessageToPeerRef = useRef<(peerId: string, data: PeerMessagePayload) => boolean>(() => false);
 
   const sendNextChunk = useCallback((peerId: string, fileId: string) => {
@@ -237,9 +256,10 @@ export function useChatManager(profile: UserProfile | null) {
             timestamp: Date.now(),
             type: "text",
             status: "delivered",
+            replyTo: data.payload.replyTo,
           };
-          await db.messages.add(newMsg);
-          dispatch({ type: "ADD_MESSAGE", payload: newMsg });
+          const id = await db.messages.add(newMsg);
+          dispatch({ type: "ADD_MESSAGE", payload: { ...newMsg, id } });
           dispatch({ type: "INCREMENT_UNREAD", payload: peerId });
           showNotification(`New message from ${peerName}`, { body: data.payload.content });
           playSoundNotification();
@@ -309,6 +329,24 @@ export function useChatManager(profile: UserProfile | null) {
           }
           break;
         }
+        case "reaction": {
+          const { messageId, reaction, userId } = data.payload;
+          dispatch({ type: "ADD_REACTION", payload: { conversationId: peerId, messageId, reaction, userId } });
+          const msg = await db.messages.get(messageId);
+          if (msg) {
+            const reactions = { ...(msg.reactions || {}) };
+            const users = [...(reactions[reaction] || [])];
+            if (!users.includes(userId)) {
+              users.push(userId);
+              reactions[reaction] = users;
+            } else {
+              reactions[reaction] = users.filter(id => id !== userId);
+              if (reactions[reaction].length === 0) delete reactions[reaction];
+            }
+            await db.messages.update(messageId, { reactions });
+          }
+          break;
+        }
         case "typing":
           dispatch({ type: "UPDATE_TYPING_STATUS", payload: { peerId, isTyping: data.payload.isTyping } });
           break;
@@ -370,7 +408,7 @@ export function useChatManager(profile: UserProfile | null) {
     if (peerId) updateTabTitle(null);
   };
 
-  const sendMessage = async (content: string) => {
+  const sendMessage = async (content: string, replyTo?: Message["replyTo"]) => {
     if (!profile || !state.selectedConversationId || !content.trim()) return;
     const tempId = crypto.randomUUID();
     const convId = state.selectedConversationId;
@@ -383,15 +421,36 @@ export function useChatManager(profile: UserProfile | null) {
       timestamp: Date.now(),
       type: "text",
       status: "pending",
+      replyTo,
     };
     dispatch({ type: "ADD_MESSAGE", payload: message });
     peerHook.sendMessageToPeer(convId, { type: "typing", payload: { isTyping: false } });
 
-    const success = peerHook.sendMessageToPeer(convId, { type: "text", payload: { content } });
+    const success = peerHook.sendMessageToPeer(convId, { type: "text", payload: { content, replyTo } });
     const newStatus = success ? "sent" : "failed";
     const { tempId: _t, ...dbMessage } = message;
     const newId = await db.messages.add({ ...dbMessage, status: newStatus });
     dispatch({ type: "UPDATE_MESSAGE_STATUS", payload: { tempId, newId, status: newStatus, conversationId: convId } });
+  };
+
+  const addReaction = async (messageId: number, reaction: string) => {
+    if (!profile || !state.selectedConversationId) return;
+    const convId = state.selectedConversationId;
+    dispatch({ type: "ADD_REACTION", payload: { conversationId: convId, messageId, reaction, userId: profile.id } });
+    peerHook.sendMessageToPeer(convId, { type: "reaction", payload: { messageId, reaction, userId: profile.id } });
+    const msg = await db.messages.get(messageId);
+    if (msg) {
+      const reactions = { ...(msg.reactions || {}) };
+      const users = [...(reactions[reaction] || [])];
+      if (!users.includes(profile.id)) {
+        users.push(profile.id);
+        reactions[reaction] = users;
+      } else {
+        reactions[reaction] = users.filter(id => id !== profile.id);
+        if (reactions[reaction].length === 0) delete reactions[reaction];
+      }
+      await db.messages.update(messageId, { reactions });
+    }
   };
 
   const sendFile = async (file: File) => {
@@ -476,6 +535,7 @@ export function useChatManager(profile: UserProfile | null) {
     sendMessage,
     sendFile,
     zipAndSendFolder,
+    addReaction,
     deletePeer: async (peerId: string) => {
       await db.deletePeerAndHistory(peerId);
       dispatch({ type: "DELETE_PEER", payload: peerId });

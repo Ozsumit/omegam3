@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState } from "react";
 import { Loader2, Zap } from "lucide-react";
 import { useUserProfile } from "@/hooks/useUserProfile";
 import { useChatManager } from "@/hooks/useChatManager";
@@ -34,28 +34,30 @@ function WelcomeModal({
   };
   return (
     <Dialog open={true}>
-      <DialogContent className="sm:max-w-[425px] bg-slate-900 text-white border-slate-700">
+      <DialogContent className="sm:max-w-[500px] rounded-[3rem] p-12 border-none shadow-swiss">
         <DialogHeader>
-          <DialogTitle className="text-2xl font-bold">Welcome to Omega Chat</DialogTitle>
-          <DialogDescription className="text-slate-300">
-            Create your profile to start connecting with peers securely.
+          <div className="h-20 w-20 bg-primary rounded-[2rem] flex items-center justify-center mb-6">
+            <Zap className="h-10 w-10 text-white" />
+          </div>
+          <DialogTitle className="text-4xl font-black tracking-tighter uppercase italic">Get Started</DialogTitle>
+          <DialogDescription className="text-lg font-medium text-muted-foreground">
+            Join the Swiss-quality P2P communication network. Secure and fast.
           </DialogDescription>
         </DialogHeader>
-        <div className="py-4">
-          <Label htmlFor="name">Display Name</Label>
+        <div className="py-8">
+          <Label htmlFor="name" className="text-xs font-black uppercase tracking-widest opacity-40 ml-4 mb-2 block">Display Name</Label>
           <Input
             id="name"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            className="bg-slate-800 border-slate-600 mt-2"
+            className="bg-secondary border-none h-16 text-xl font-bold rounded-2xl px-6"
             placeholder="Enter your name"
             onKeyDown={(e) => e.key === "Enter" && handleCreate()}
           />
         </div>
         <DialogFooter>
-          <Button onClick={handleCreate} disabled={isCreating || !name.trim()} className="w-full">
-            {isCreating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            Get Started
+          <Button onClick={handleCreate} disabled={isCreating || !name.trim()} className="h-16 w-full rounded-2xl text-lg font-bold bg-primary text-white shadow-swiss">
+            {isCreating ? <Loader2 className="mr-2 h-6 w-6 animate-spin" /> : "Join Network"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -73,40 +75,36 @@ function AppLayout({ profile }: { profile: UserProfile }) {
   const currentMessages = chat.state.messages[chat.state.selectedConversationId ?? ""] ?? [];
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-slate-950 text-white overflow-hidden">
-      <header className="flex items-center px-6 py-4 bg-slate-900 border-b border-slate-800">
-        <Zap className="text-blue-500 mr-2" />
-        <h1 className="text-xl font-bold tracking-tight">Omega Chat</h1>
-      </header>
-      <div className="flex flex-1 overflow-hidden">
-        <div className={`${chat.state.selectedConversationId ? "hidden" : "flex"} md:flex w-full md:w-80 lg:w-96`}>
-          <Sidebar
-            profile={profile}
-            peers={peersArray}
-            selectedConversationId={chat.state.selectedConversationId}
-            onSelectConversation={chat.selectConversation}
-            onAddPeer={chat.addAndConnectToPeer}
-            onConnectToPeer={chat.connectToPeer}
-          />
-        </div>
-        <main className={`${!chat.state.selectedConversationId ? "hidden" : "flex"} md:flex flex-1`}>
-          <ChatWindow
-            profile={profile}
-            selectedConversationId={chat.state.selectedConversationId}
-            messages={currentMessages}
-            fileTransfers={chat.state.fileTransfers}
-            peers={chat.state.peers}
-            onSendMessage={chat.sendMessage}
-            onSendFile={chat.sendFile}
-            onDownloadFile={chat.downloadFile}
-            onBack={() => chat.selectConversation(null)}
-            onSendTypingStatus={chat.sendTypingStatus}
-            onClearConversationMessages={chat.clearConversationMessages}
-            onDeletePeer={chat.deletePeer}
-            isPeerTyping={chat.state.selectedConversationId ? chat.state.typingStates[chat.state.selectedConversationId] : false}
-          />
-        </main>
+    <div className="flex h-screen w-screen bg-background text-foreground overflow-hidden font-sans">
+      <div className={`${chat.state.selectedConversationId ? "hidden" : "flex"} md:flex w-full md:w-[400px] lg:w-[450px] shrink-0`}>
+        <Sidebar
+          profile={profile}
+          peers={peersArray}
+          selectedConversationId={chat.state.selectedConversationId}
+          onSelectConversation={chat.selectConversation}
+          onAddPeer={chat.addAndConnectToPeer}
+          onConnectToPeer={chat.connectToPeer}
+        />
       </div>
+      <main className={`${!chat.state.selectedConversationId ? "hidden" : "flex"} md:flex flex-1`}>
+        <ChatWindow
+          profile={profile}
+          selectedConversationId={chat.state.selectedConversationId}
+          messages={currentMessages}
+          fileTransfers={chat.state.fileTransfers}
+          peers={chat.state.peers}
+          onSendMessage={chat.sendMessage}
+          onSendFile={chat.sendFile}
+          onZipAndSendFolder={chat.zipAndSendFolder}
+          onDownloadFile={chat.downloadFile}
+          onAddReaction={chat.addReaction}
+          onBack={() => chat.selectConversation(null)}
+          onSendTypingStatus={chat.sendTypingStatus}
+          onClearConversationMessages={chat.clearConversationMessages}
+          onDeletePeer={chat.deletePeer}
+          isPeerTyping={chat.state.selectedConversationId ? chat.state.typingStates[chat.state.selectedConversationId] : false}
+        />
+      </main>
     </div>
   );
 }
@@ -116,8 +114,10 @@ export default function Home() {
 
   if (isLoading) {
     return (
-      <div className="flex h-screen w-screen items-center justify-center bg-slate-950">
-        <Loader2 className="h-10 w-10 animate-spin text-blue-500" />
+      <div className="flex h-screen w-screen items-center justify-center bg-background">
+        <div className="animate-bounce">
+          <Zap className="h-12 w-12 text-primary" />
+        </div>
       </div>
     );
   }
