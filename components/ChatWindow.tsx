@@ -83,7 +83,7 @@ function MessageBubble({
 
   return (
     <div className={`flex flex-col ${isMe ? "items-end" : "items-start"} mb-8 group animate-message w-full`}>
-      <div className={`flex items-center gap-2 max-w-[90%] md:max-w-[75%] ${isMe ? "flex-row-reverse" : "flex-row"}`}>
+      <div className={`flex items-center gap-3 max-w-[95%] md:max-w-[80%] ${isMe ? "flex-row-reverse" : "flex-row"}`}>
         <div className={`relative p-6 rounded-[2.5rem] transition-all duration-300 ${
           isMe
             ? "bg-primary text-white rounded-tr-none shadow-swiss"
@@ -101,8 +101,8 @@ function MessageBubble({
           ) : (
             <div className="flex flex-col gap-6 min-w-[240px]">
               {imgUrl ? (
-                <div className="rounded-3xl overflow-hidden shadow-swiss border-4 border-background bg-muted">
-                  <img src={imgUrl} alt={message.fileInfo?.name} className="w-full h-auto max-h-[400px] object-contain" />
+                <div className="rounded-3xl overflow-hidden shadow-swiss border-4 border-background bg-muted max-w-full">
+                  <img src={imgUrl} alt={message.fileInfo?.name} className="w-full h-auto max-h-[500px] object-contain" />
                 </div>
               ) : (
                 <div className="flex items-center gap-4">
@@ -148,17 +148,17 @@ function MessageBubble({
                   className="bg-background border-2 shadow-swiss px-2.5 py-1 rounded-full text-sm font-bold flex items-center gap-1.5 hover:scale-110 transition-all active:scale-90"
                 >
                   <span>{emoji}</span>
-                  <span className="text-[10px] opacity-40 font-black">{users.length}</span>
+                  <span className="text-[10px] opacity-60 font-black">{users.length}</span>
                 </button>
               ))}
             </div>
           )}
         </div>
 
-        <div className={`flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200`}>
+        <div className={`flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200`}>
           <ReactionPicker onSelect={(r) => onReact(message.id!, r)} />
           <button onClick={() => onReply(message)} className="h-10 w-10 flex items-center justify-center bg-secondary rounded-full hover:bg-muted transition-colors shadow-sm">
-            <Reply className="h-4 w-4 text-muted-foreground" />
+            <Reply className="h-5 w-5 text-foreground/60" />
           </button>
         </div>
       </div>
@@ -180,10 +180,10 @@ function ReactionPicker({ onSelect }: { onSelect: (r: string) => void }) {
     <Popover>
       <PopoverTrigger asChild>
         <button className="h-10 w-10 flex items-center justify-center bg-secondary rounded-full hover:bg-muted transition-colors shadow-sm">
-          <SmilePlus className="h-4 w-4 text-muted-foreground" />
+          <SmilePlus className="h-5 w-5 text-foreground/60" />
         </button>
       </PopoverTrigger>
-      <PopoverContent side="top" className="rounded-full p-1.5 border-none shadow-swiss w-fit flex gap-1 animate-in zoom-in-50 duration-200">
+      <PopoverContent side="top" className="rounded-full p-1.5 border shadow-swiss w-fit flex gap-1 animate-in zoom-in-50 duration-200 bg-background">
         {REACTIONS.map(r => (
           <button
             key={r}
@@ -257,8 +257,8 @@ export function ChatWindow({
         <div className="h-32 w-32 bg-primary rounded-[3rem] mx-auto mb-8 flex items-center justify-center shadow-swiss animate-pulse">
           <Zap className="h-16 w-16 text-white" />
         </div>
-        <h2 className="text-4xl font-black tracking-tighter uppercase italic leading-tight">Swiss Standard<br/>P2P Protocol</h2>
-        <p className="text-muted-foreground font-bold uppercase tracking-widest text-[10px] mt-4 opacity-40">Secure End-to-End Encrypted Link</p>
+        <h2 className="text-4xl font-black tracking-tighter uppercase italic leading-tight text-foreground">Swiss Standard<br/>P2P Protocol</h2>
+        <p className="text-foreground/40 font-bold uppercase tracking-widest text-[10px] mt-4">Secure End-to-End Encrypted Link</p>
       </div>
     </div>
   );
@@ -269,9 +269,9 @@ export function ChatWindow({
     <div className="flex flex-col h-full bg-background relative overflow-hidden">
       {folderToSend && (
         <Dialog open={true} onOpenChange={() => setFolderToSend(null)}>
-          <DialogContent className="rounded-[3rem] p-10 border-none shadow-swiss">
+          <DialogContent className="rounded-[3rem] p-10 border shadow-swiss bg-background">
             <DialogHeader>
-              <DialogTitle className="text-3xl font-black tracking-tighter uppercase leading-none">Pack Folder</DialogTitle>
+              <DialogTitle className="text-3xl font-black tracking-tighter uppercase leading-none text-foreground">Pack Folder</DialogTitle>
               <DialogDescription className="text-lg font-medium text-muted-foreground mt-2">
                 "{folderToSend.name}" will be processed for secure transfer.
               </DialogDescription>
@@ -290,7 +290,7 @@ export function ChatWindow({
       <header className="flex items-center justify-between px-6 md:px-10 py-6 md:py-8 border-b bg-background/80 backdrop-blur-md z-10">
         <div className="flex items-center gap-4 md:gap-6">
           <Button variant="ghost" size="icon" className="md:hidden -ml-4" onClick={onBack}>
-            <ArrowLeft className="h-6 w-6" />
+            <ArrowLeft className="h-6 w-6 text-foreground" />
           </Button>
           <div className="relative shrink-0">
             <Avatar className="h-12 w-12 md:h-16 md:w-16 border-4 border-background shadow-swiss">
@@ -301,24 +301,24 @@ export function ChatWindow({
             )}
           </div>
           <div className="min-w-0">
-            <h3 className="text-xl md:text-2xl font-black tracking-tight truncate leading-tight">{peer?.name}</h3>
-            <p className={`text-[9px] font-black uppercase tracking-[0.2em] ${isPeerTyping ? "text-primary animate-pulse" : "opacity-40"}`}>
+            <h3 className="text-xl md:text-2xl font-black tracking-tight truncate leading-tight text-foreground">{peer?.name}</h3>
+            <p className={`text-[9px] font-black uppercase tracking-[0.2em] ${isPeerTyping ? "text-primary animate-pulse" : "text-foreground/40"}`}>
               {isPeerTyping ? "Transmitting..." : peer?.status === 'online' ? 'Link Active' : 'Offline'}
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="secondary" size="icon" className="h-10 w-10 md:h-12 md:w-12 rounded-2xl shadow-sm"><Info className="h-5 w-5 opacity-50" /></Button>
+          <Button variant="secondary" size="icon" className="h-10 w-10 md:h-12 md:w-12 rounded-2xl shadow-sm"><Info className="h-5 w-5 text-foreground/60" /></Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="secondary" size="icon" className="h-10 w-10 md:h-12 md:w-12 rounded-2xl shadow-sm"><MoreVertical className="h-5 w-5 opacity-50" /></Button>
+              <Button variant="secondary" size="icon" className="h-10 w-10 md:h-12 md:w-12 rounded-2xl shadow-sm"><MoreVertical className="h-5 w-5 text-foreground/60" /></Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="rounded-[2rem] p-3 border-none shadow-swiss min-w-[220px]">
+            <DropdownMenuContent align="end" className="rounded-[2rem] p-3 border shadow-swiss min-w-[220px] bg-background">
               <DropdownMenuItem onClick={() => onClearConversationMessages(selectedConversationId)} className="rounded-2xl h-14 font-bold text-sm">
-                <Trash2 className="h-5 w-5 mr-4 opacity-50" /> Clear History
+                <Trash2 className="h-5 w-5 mr-4 text-foreground/40" /> Clear History
               </DropdownMenuItem>
               <DropdownMenuItem className="text-primary rounded-2xl h-14 font-bold text-sm" onClick={() => onDeletePeer(selectedConversationId)}>
-                <UserX className="h-5 w-5 mr-4 opacity-50" /> Delete Peer
+                <UserX className="h-5 w-5 mr-4 text-primary/60" /> Delete Peer
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -349,16 +349,16 @@ export function ChatWindow({
               <div className="flex items-center gap-4 min-w-0">
                 <Reply className="h-5 w-5 text-primary shrink-0" />
                 <div className="min-w-0">
-                  <p className="text-[9px] font-black uppercase tracking-[0.2em] opacity-40">Replying to {replyTo.senderName}</p>
-                  <p className="text-sm font-bold truncate leading-relaxed">{replyTo.content}</p>
+                  <p className="text-[9px] font-black uppercase tracking-[0.2em] text-foreground/40">Replying to {replyTo.senderName}</p>
+                  <p className="text-sm font-bold truncate leading-relaxed text-foreground">{replyTo.content}</p>
                 </div>
               </div>
               <button onClick={() => setReplyTo(null)} className="h-10 w-10 shrink-0 flex items-center justify-center hover:bg-black/5 rounded-full transition-colors">
-                <X className="h-5 w-5 opacity-40" />
+                <X className="h-5 w-5 text-foreground/40" />
               </button>
             </div>
           )}
-          <div className="flex items-center gap-3 bg-secondary rounded-[3.5rem] p-2.5 shadow-swiss border border-white/5">
+          <div className="flex items-center gap-3 bg-secondary rounded-[3.5rem] p-2.5 shadow-swiss border">
             <Input
               type="file"
               className="hidden"
@@ -384,12 +384,12 @@ export function ChatWindow({
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="icon" className="h-14 w-14 rounded-full hover:bg-background transition-colors shrink-0">
-                  <Paperclip className="h-6 w-6 opacity-40" />
+                  <Paperclip className="h-6 w-6 text-foreground/40" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent side="top" align="start" className="rounded-[2.5rem] p-3 border-none shadow-swiss min-w-[200px]">
+              <DropdownMenuContent side="top" align="start" className="rounded-[2.5rem] p-3 border shadow-swiss min-w-[200px] bg-background">
                 <DropdownMenuItem onClick={() => fileRef.current?.click()} className="rounded-2xl h-14 font-bold">
-                  <FileText className="h-5 w-5 mr-4 opacity-40" /> Send File
+                  <FileText className="h-5 w-5 mr-4 text-foreground/40" /> Send File
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => {
                   if ("showDirectoryPicker" in window) {
@@ -400,7 +400,7 @@ export function ChatWindow({
                     folderRef.current?.click();
                   }
                 }} className="rounded-2xl h-14 font-bold">
-                  <Archive className="h-5 w-5 mr-4 opacity-40" /> Send Folder
+                  <Archive className="h-5 w-5 mr-4 text-foreground/40" /> Send Folder
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -413,18 +413,18 @@ export function ChatWindow({
                 onSendTypingStatus(e.target.value.length > 0);
               }}
               onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-              className="bg-transparent border-none focus-visible:ring-0 text-lg md:text-xl font-medium h-14 px-2"
+              className="bg-transparent border-none focus-visible:ring-0 text-lg md:text-xl font-medium h-14 px-2 text-foreground"
             />
 
             <Button variant="ghost" size="icon" className="h-14 w-14 rounded-full hover:bg-background transition-colors shrink-0">
-              <SmilePlus className="h-6 w-6 opacity-40" />
+              <SmilePlus className="h-6 w-6 text-foreground/40" />
             </Button>
 
             <Button
               onClick={handleSend}
               disabled={!input.trim()}
               className={`h-14 w-14 rounded-full transition-all duration-300 shadow-swiss shrink-0 ${
-                input.trim() ? "bg-primary text-white scale-100 hover:scale-105" : "bg-muted-foreground/10 scale-90 opacity-30"
+                input.trim() ? "bg-primary text-white scale-100 hover:scale-105" : "bg-foreground/10 scale-90 opacity-30"
               }`}
             >
               <Send className="h-6 w-6" />
